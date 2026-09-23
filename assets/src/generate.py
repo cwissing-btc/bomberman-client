@@ -39,10 +39,11 @@ def build_sprites():
     for f in range(4):
         out.append((f"crate_break_{f}", T.crate_break(f).img))
 
-    # Spieler
-    for d in ("down", "up", "left", "right"):
-        for f in range(4):
-            out.append((f"player_{d}_{f}", PL.DIRECTIONS[d](f).img))
+    # Spieler: vier Farbvarianten x vier Richtungen x vier Frames
+    for v in PL.VARIANTS:
+        for d in PL.DIRECTION_NAMES:
+            for f in range(4):
+                out.append((f"player_{v}_{d}_{f}", PL.player(v, d, f).img))
 
     # Bombe
     for f in range(B.BOMB_FRAMES):
@@ -63,14 +64,15 @@ def build_sprites():
 
 def build_animations():
     anims = {}
-    for d in ("down", "up", "left", "right"):
-        anims[f"player_walk_{d}"] = {
-            "frames": [f"player_{d}_{f}" for f in range(4)],
-            "fps": 10, "loop": True,
-        }
-        anims[f"player_idle_{d}"] = {
-            "frames": [f"player_{d}_0"], "fps": 1, "loop": True,
-        }
+    for v in PL.VARIANTS:
+        for d in PL.DIRECTION_NAMES:
+            anims[f"player_{v}_walk_{d}"] = {
+                "frames": [f"player_{v}_{d}_{f}" for f in range(4)],
+                "fps": 10, "loop": True,
+            }
+            anims[f"player_{v}_idle_{d}"] = {
+                "frames": [f"player_{v}_{d}_0"], "fps": 1, "loop": True,
+            }
     anims["bomb_tick"] = {
         "frames": [f"bomb_{f}" for f in range(B.BOMB_FRAMES)],
         "fps": 8, "loop": True,
@@ -96,7 +98,15 @@ def build_animations():
 
 def write_all(outdir):
     sprites = build_sprites()
-    os.makedirs(os.path.join(outdir, "sprites"), exist_ok=True)
+    sprite_dir = os.path.join(outdir, "sprites")
+    os.makedirs(sprite_dir, exist_ok=True)
+
+    # Alte PNGs entfernen: sonst bleiben nach einer Umbenennung Leichen
+    # liegen, die im Atlas nicht mehr vorkommen.
+    wanted = {f"{name}.png" for name, _ in sprites}
+    for old in os.listdir(sprite_dir):
+        if old.endswith(".png") and old not in wanted:
+            os.remove(os.path.join(sprite_dir, old))
 
     # Einzeldateien
     for name, img in sprites:
@@ -121,6 +131,7 @@ def write_all(outdir):
             "count": len(sprites),
             "generated": date.today().isoformat(),
             "note": "Alle Frames 64x64, Ursprung oben links, Alpha-Kanal.",
+            "playerVariants": PL.VARIANTS,
         },
         "frames": frames,
         "animations": build_animations(),
@@ -317,9 +328,10 @@ function renderScene(){
   draw('bomb_'+(tick%4), 2*T, 4*T, sc);
   draw('item_fire_up_'+(tick%2), 4*T, 2*T, sc);
   draw('item_speed_up_'+(tick%2), 10*T, 5*T, sc);
-  draw('player_right_'+(tick%4), 3*T, 2*T, sc);
-  draw('player_down_'+(tick%4), 0*T, 0*T, sc);
-  draw('player_up_'+(tick%4), 11*T, 1*T, sc);
+  draw('player_blue_right_'+(tick%4), 3*T, 2*T, sc);
+  draw('player_red_down_'+(tick%4), 0*T, 0*T, sc);
+  draw('player_yellow_up_'+(tick%4), 11*T, 1*T, sc);
+  draw('player_purple_left_'+(tick%4), 10*T, 3*T, sc);
   draw('crate_break_'+Math.min(3, tick%6), 5*T, 5*T, sc);
 }
 sheetImg.onload = renderScene;

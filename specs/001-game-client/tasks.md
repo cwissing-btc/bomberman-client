@@ -205,3 +205,15 @@ erscheinen (quickstart.md Szenario 4).
 1. **MVP zuerst**: Setup + Foundational + US1 → anmelden, Lobby, Spielfeld sehen.
 2. **Inkrementell**: US2 (manuelle Steuerung), dann US3 (Bot), dann Polish.
 3. Jede Story ist einzeln gegen `just server` (oder den Test-Server) demonstrierbar.
+
+---
+
+## Nachträge (nach Abschluss der 42 Tasks)
+
+- [X] T043 Bot v2 in `src/bomberman_client/bot.py`: zeitbewusstes Gefahrenmodell (Zeitfenster je
+  Zelle, Kettenreaktionen, Radius je Besitzer/Power-ups, exakte Sudden-Death-Reihenfolge),
+  Suche über (Zelle, Zeit) mit Warten, rechtzeitige Flucht beim Bombenlegen, Zielbewertung mit
+  Hysterese; Tests in `tests/test_bot.py` (14).
+- [X] T044 Asset-Pack v2 (`assets/`, 121 Frames) übernommen; `render.py` nutzt die vier
+  Spielerfarben `player_{blue,red,yellow,purple}_*` nach Spieler-ID.
+- [X] T045 `tools/test_server.py --seed` für reproduzierbare Karten (A/B-Vergleiche).

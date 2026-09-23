@@ -50,9 +50,25 @@ Ein Match startet erst, wenn in der Moderations-Web-UI (Standard `http://127.0.0
 
 ## Bot-Modus
 
-Der Bot steuert nur die **eigene** Figur: Er weicht Flammen und zündenden Bomben aus, legt
-Bomben (per Kombi-Aktion, um sofort wegzulaufen) neben Kisten oder Gegnern und sammelt sichere
-Power-ups. Die Regelkonstanten liest er aus `MATCH_INIT` – nichts ist hartkodiert.
+Der Bot steuert nur die **eigene** Figur und plant **zeitbewusst**:
+
+- Jede Zelle bekommt Gefahren-Zeitfenster: aktive Flammen, vorhergesagte Explosionen aller
+  Bomben mit dem **aktuellen Radius des jeweiligen Besitzers** (Power-ups vergrößern ihn; bei
+  unbekanntem Besitzer gilt das Regel-Maximum), **Kettenreaktionen** und die exakte
+  Sudden-Death-Reihenfolge des Servers.
+- Die Wegsuche läuft über (Zelle, Zeit) mit der eigenen Schrittdauer (Speed-Power-up) und kennt
+  Warten als Zug – so rennt er durch eine Bombenlinie, wenn die Zeit reicht, und bleibt weg,
+  wenn nicht.
+- Bomben legt er nur, wenn es lohnt (Kisten/Gegner im Radius) **und** die Flucht in der
+  Zündzeit gelingt – auch bei großem eigenen Radius. Immer per Kombi-Aktion (Bombe + Schritt).
+- Ziele: Power-ups (Flamme > Bombe > Tempo) und Bombenplätze mit vielen Kisten/Gegnern, mit
+  Hysterese gegen Hin-und-her-Laufen.
+- Robust bei Paketverlust: Zähler (Zündschnur, Flammen) werden um die vergangenen Ticks
+  gealtert, es gilt eine Sicherheitsmarge, und bei eingefrorenem Zustand (verlorenes DELTA)
+  läuft er den bereits zeitlich geprüften Pfad per **Koppelnavigation** nach Wanduhr weiter –
+  ohne je blind eine weitere Bombe zu legen.
+
+Die Regelkonstanten liest er aus `MATCH_INIT` – nichts ist hartkodiert.
 
 ## Tests
 
@@ -96,9 +112,7 @@ assets/                Team-Sprites (64×64)
 
 ## Hinweise zur echten Arena
 
-Verifiziert gegen den Server (jegollub-btc/bomberman): alle Byte-Layouts stimmen überein. Zwei
-Punkte in der Server-Doku sind fehlerhaft (harmlos, weil Encoder/Decoder symmetrisch sind):
-
-- Der Regelblock ist **19 Bytes** lang, nicht 17 (`RULES_ENCODED_LEN`/`BOT_GUIDE.md` §5.8).
-- Das Delta-Record **`WALL_CLOSED` (`0x0D`)** (Sudden Death) fehlt in `BOT_GUIDE.md`; der Client
-  behandelt es.
+Verifiziert gegen den Server (jegollub-btc/bomberman), byteweise und live: alle Layouts stimmen
+überein. Zwei ursprünglich gemeldete Doku-Fehler des Servers (Regelblock 17 statt 19 Bytes;
+`WALL_CLOSED`/`0x0D` undokumentiert) sind im Server-Update vom 2026-09-23 behoben – der Client
+behandelte beides bereits korrekt.

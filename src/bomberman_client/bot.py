@@ -1,9 +1,22 @@
-"""Einfacher Bot: wählt pro Zustand eine Aktion für die EIGENE Figur (Prinzip II).
+"""Zeitbewusster Bot: wählt pro Zustand eine Aktion für die EIGENE Figur (Prinzip II).
 
-Der Bot trifft keine Spielentscheidungen – er sagt nur Gefahr voraus, um zu wählen, *welche*
-Aktion (dieselben Codes wie beim Menschen) er sendet. Strategie (research.md R12):
-Gefahr meiden → Bombe+Ausweichen neben Kiste/Gegner → sicheres Power-up → zur nächsten Kiste →
-sonst warten.
+Der Bot trifft keine Spielentscheidungen – er sagt Gefahr voraus, um zu wählen, *welche* Aktion
+(dieselben Codes wie beim Menschen) er sendet. Alle Regelkonstanten kommen aus ``MATCH_INIT``.
+
+Modell
+------
+* Jede Zelle bekommt **Gefahren-Zeitfenster** ``[start, ende]`` (Ticks ab jetzt):
+  aktive Flammen, vorhergesagte Explosionen aller Bomben (mit dem *aktuellen* Radius des
+  jeweiligen Besitzers – Power-ups vergrößern ihn), **Kettenreaktionen** (eine Bombe im Radius
+  einer früher zündenden zündet mit) und die Sudden-Death-Ringe.
+* Bewegung: Ein Schritt dauert ``ticks_to_cross(speed)`` Ticks. Beim Server gilt die Figur ab
+  Schrittbeginn als auf dem Zielfeld → ein Feld muss ab dem Moment sicher sein, in dem der
+  Schritt startet, bis man es wieder verlassen kann.
+* Wegsuche über (Zelle, Zeit) inkl. **Warten** als Zug. Ein „sicherer Hafen" ist eine Zelle, die
+  ab Ankunft für einen ganzen Zünd-+Flammenzyklus ungefährlich bleibt.
+
+Prioritäten: überleben → bomben (wenn lohnend UND Flucht *rechtzeitig* machbar) → Ziel
+ansteuern (Power-up > Bombenplatz mit vielen Kisten/Gegnern) → warten.
 """
 
 from __future__ import annotations
@@ -11,15 +24,54 @@ from __future__ import annotations
 from collections import deque
 
 from .protocol import Action
-from .state import TILE_FREE, TILE_SOFT, TILE_WALL, GameState
+from .state import (
+    POWERUP_EXTRA_BOMB,
+    POWERUP_FLAME,
+    POWERUP_SPEED,
+    TILE_FREE,
+    TILE_SOFT,
+    TILE_WALL,
+    GameState,
+    Rules,
+)
 from .track import TrackState
 
 DIRS = [(0, -1), (0, 1), (-1, 0), (1, 0)]
 _STEP = {(0, -1): Action.UP, (0, 1): Action.DOWN, (-1, 0): Action.LEFT, (1, 0): Action.RIGHT}
 _STEP_BOMB = {(0, -1): Action.UP_BOMB, (0, 1): Action.DOWN_BOMB,
               (-1, 0): Action.LEFT_BOMB, (1, 0): Action.RIGHT_BOMB}
-_DEFAULT_RADIUS = 2
 
+INF = 1 << 30
+K_MAX = 20                      # Planungstiefe in Schritten
+SUDDEN_DEATH_TICKS_PER_CELL = 6  # BOT_GUIDE.md §7
+_POWERUP_VALUE = {POWERUP_FLAME: 3.0, POWERUP_EXTRA_BOMB: 2.5, POWERUP_SPEED: 2.0}
+_HYSTERESIS = 1.25              # Bonus für das zuletzt verfolgte Ziel (kein Flip-Flop)
+BOMB_COOLDOWN_TICKS = 12        # nach einem Bombenbefehl auf BOMB_ADD warten, statt nachzulegen
+
+# Bombe ist eine Einmal-Aktion: bei unverändertem Zustand nur die Bewegung wiederholen.
+_WITHOUT_BOMB = {Action.BOMB: Action.NOOP, Action.UP_BOMB: Action.UP,
+                 Action.DOWN_BOMB: Action.DOWN, Action.LEFT_BOMB: Action.LEFT,
+                 Action.RIGHT_BOMB: Action.RIGHT}
+
+_TICKS_PER_SECOND = 60          # feste Tickrate des Servers (BOT_GUIDE.md)
+
+# Gedächtnis zwischen Ticks: zuletzt geplanter Pfad (für Koppelnavigation bei eingefrorenem
+# Zustand), letztes Ziel, gesperrte Plätze, wann zuletzt eine Bombe angefordert wurde.
+_memo: dict = {}
+
+
+def reset() -> None:
+    """Gedächtnis löschen (z. B. für Tests oder ein neues Match)."""
+    _memo.clear()
+    _memo.update({"tick": None, "action": Action.NOOP, "plan": [], "plan_start": None,
+                  "plan_t0": 0.0, "plan_step_s": 8 / _TICKS_PER_SECOND, "plan_delay_s": 0.0,
+                  "target": None, "banned": {}, "bomb_sent_tick": None})
+
+
+reset()
+
+
+# --- Geometrie ---------------------------------------------------------------
 
 def walkable(state: GameState, x: int, y: int) -> bool:
     """Begehbar: freies Feld in Grenzen und keine Bombe darauf."""
@@ -31,81 +83,334 @@ def walkable(state: GameState, x: int, y: int) -> bool:
 
 
 def blast_cells(state: GameState, bx: int, by: int, radius: int) -> set[tuple[int, int]]:
-    """Zellen, die eine Bombe auf (bx,by) mit Reichweite ``radius`` treffen würde."""
+    """Zellen, die eine Bombe auf (bx,by) mit Reichweite ``radius`` trifft (Kreuz, an Wand
+    gestoppt; eine Kiste wird noch getroffen und stoppt dann)."""
     cells = {(bx, by)}
     for dx, dy in DIRS:
-        for r in range(1, radius + 1):
+        for r in range(1, max(1, radius) + 1):
             x, y = bx + dx * r, by + dy * r
             if not (0 <= x < state.width and 0 <= y < state.height):
                 break
-            if state.tiles[y][x] == TILE_WALL:
+            tile = state.tiles[y][x]
+            if tile == TILE_WALL:
                 break
             cells.add((x, y))
-            if state.tiles[y][x] == TILE_SOFT:
-                break  # Kiste stoppt die Explosion (Zelle noch getroffen)
+            if tile == TILE_SOFT:
+                break
     return cells
 
 
 def danger_cells(state: GameState) -> set[tuple[int, int]]:
-    """Aktuell tödliche Flammen plus vorhergesagter Wirkungsbereich aller Bomben."""
-    danger: set[tuple[int, int]] = {(f.x, f.y) for f in state.flames}
-    for bomb in state.bombs.values():
-        owner = state.players.get(bomb.owner)
-        radius = owner.flame if owner else _DEFAULT_RADIUS
-        danger |= blast_cells(state, bomb.x, bomb.y, radius)
-    return danger
+    """Kompatibilitäts-Helfer: alle Zellen, die jetzt oder künftig gefährlich sind."""
+    return set(_danger_intervals(state, Rules(), None).keys())
 
 
-def bfs(state: GameState, start: tuple[int, int], goal_pred, avoid: set) -> list[tuple[int, int]]:
-    """Kürzester Pfad (ohne Startzelle) zur ersten Zelle mit ``goal_pred``; sonst []."""
-    queue = deque([start])
-    came_from = {start: None}
-    while queue:
-        cur = queue.popleft()
-        if cur != start and goal_pred(cur):
-            path = []
-            while cur != start:
-                path.append(cur)
-                cur = came_from[cur]
-            path.reverse()
-            return path
-        cx, cy = cur
-        for dx, dy in DIRS:
-            nxt = (cx + dx, cy + dy)
-            if nxt in came_from or nxt in avoid:
-                continue
-            if not walkable(state, nxt[0], nxt[1]):
-                continue
-            came_from[nxt] = cur
-            queue.append(nxt)
-    return []
+# --- Gefahrenmodell ----------------------------------------------------------
+
+def _radius_of(state: GameState, owner_id: int, rules: Rules) -> int:
+    owner = state.players.get(owner_id)
+    # Unbekannter Besitzer → konservativ das Regel-Maximum annehmen (Power-ups!)
+    return owner.flame if owner else rules.max_flame
 
 
-def _has_soft_neighbor(state: GameState, cell: tuple[int, int]) -> bool:
-    x, y = cell
-    for dx, dy in DIRS:
-        nx, ny = x + dx, y + dy
-        if 0 <= nx < state.width and 0 <= ny < state.height and state.tiles[ny][nx] == TILE_SOFT:
-            return True
-    return False
+SAFETY_MARGIN_TICKS = 6   # Latenz + Jitter (~3 Frames): Gefahr früher/länger annehmen
 
 
-def _adjacent_target(state: GameState, x: int, y: int, my_id: int) -> bool:
-    """Steht die Figur neben einer Kiste oder einem lebenden Gegner?"""
-    for dx, dy in DIRS:
-        nx, ny = x + dx, y + dy
-        if 0 <= nx < state.width and 0 <= ny < state.height:
-            if state.tiles[ny][nx] == TILE_SOFT:
-                return True
+def _remaining(value: int, seen_tick: int, now_tick: int) -> int:
+    """Restzeit eines Zählers, gealtert um die seit dem Stempel vergangenen Ticks.
+
+    KEYFRAMEs kommen nur alle 30 Ticks und DELTAs zählen fuse/ticks nicht herunter – ohne
+    Alterung hielte der Bot eine Bombe bis zu 0,5 s länger für harmlos, als sie ist."""
+    return max(0, value - max(0, now_tick - seen_tick))
+
+
+def _danger_intervals(state: GameState, rules: Rules,
+                      extra_bomb: tuple[tuple[int, int], int] | None,
+                      now_tick: int = 0) -> dict:
+    """Zelle → Liste von (start, ende) in Ticks ab jetzt, in denen die Zelle tödlich ist.
+
+    ``extra_bomb`` = (Zelle, Radius) simuliert eine eigene, jetzt gelegte Bombe.
+    ``now_tick`` = aktueller Server-Tick (zum Altern der Zähler).
+    """
+    iv: dict[tuple[int, int], list[tuple[int, int]]] = {}
+    margin = SAFETY_MARGIN_TICKS
+
+    def add(cell, s, e):
+        iv.setdefault(cell, []).append((max(0, s), e))
+
+    for f in state.flames:
+        add((f.x, f.y), 0, _remaining(f.ticks, f.seen_tick, now_tick) + margin)
+
+    # Bomben inkl. Kettenreaktion: det = min(eigene Zündzeit, Zündzeit jeder Bombe, deren
+    # Explosion mich erreicht) – bis Fixpunkt.
+    specs: list[list] = []          # [zelle, det, blast]
+    for b in state.bombs.values():
+        specs.append([(b.x, b.y), _remaining(b.fuse, b.seen_tick, now_tick),
+                      blast_cells(state, b.x, b.y, _radius_of(state, b.owner, rules))])
+    if extra_bomb is not None:
+        cell, radius = extra_bomb
+        specs.append([cell, rules.bomb_fuse_ticks, blast_cells(state, cell[0], cell[1], radius)])
+    changed = True
+    while changed:
+        changed = False
+        for a in specs:
+            for b in specs:
+                if a is not b and b[0] in a[2] and a[1] < b[1]:
+                    b[1] = a[1]
+                    changed = True
+    for cell, det, blast in specs:
+        for c in blast:
+            add(c, det - margin, det + rules.flame_duration_ticks + margin)
+
+    _sudden_death_intervals(state, rules, add)
+    return iv
+
+
+_closing_cache: dict[tuple[int, int], list[tuple[int, int]]] = {}
+
+
+def closing_order(width: int, height: int) -> list[tuple[int, int]]:
+    """Exakte Sudden-Death-Reihenfolge des Servers (bomber-domain ``closing_order``):
+    Innenzellen, äußerster Ring zuerst, im Uhrzeigersinn ab (1,1). Zelle ``i`` wird bei
+    ``sudden_death_tick + 6*i`` zur Wand."""
+    key = (width, height)
+    if key in _closing_cache:
+        return _closing_cache[key]
+    top, bottom, left, right = 1, height - 2, 1, width - 2
+    order: list[tuple[int, int]] = []
+    while top <= bottom and left <= right:
+        for x in range(left, right + 1):
+            order.append((x, top))
+        for y in range(top + 1, bottom + 1):
+            order.append((right, y))
+        if top < bottom:
+            for x in range(right - 1, left - 1, -1):
+                order.append((x, bottom))
+        if left < right:
+            for y in range(bottom - 1, top, -1):
+                order.append((left, y))
+        top, bottom, left, right = top + 1, bottom - 1, left + 1, right - 1
+    _closing_cache[key] = order
+    return order
+
+
+def _sudden_death_intervals(state: GameState, rules: Rules, add) -> None:
+    """Jede Innenzelle wird ab ihrem exakten Schließzeitpunkt dauerhaft tödlich."""
+    total = rules.round_time_ticks
+    if not total or rules.sudden_death_tick >= total or not state.ticks_remaining:
+        return
+    now_tick = total - state.ticks_remaining
+    horizon = rules.bomb_fuse_ticks * 4
+    for i, cell in enumerate(closing_order(state.width, state.height)):
+        start = rules.sudden_death_tick + SUDDEN_DEATH_TICKS_PER_CELL * i - now_tick
+        if start > horizon:
+            break
+        add(cell, start, INF)
+
+
+class _World:
+    """Sicht des Bots auf einen Zustand: Passierbarkeit + Gefahren-Zeitfenster."""
+
+    def __init__(self, state: GameState, rules: Rules, my_id: int,
+                 extra_bomb: tuple[tuple[int, int], int] | None = None,
+                 now_tick: int = 0) -> None:
+        self.state = state
+        self.rules = rules
+        self.blocked: set[tuple[int, int]] = {(b.x, b.y) for b in state.bombs.values()}
+        if extra_bomb is not None:
+            self.blocked.add(extra_bomb[0])
         for p in state.players.values():
-            if p.id != my_id and p.alive and (p.x, p.y) == (nx, ny):
-                return True
-    return False
+            if p.id != my_id and p.alive:
+                self.blocked.add((p.x, p.y))
+        self.intervals = _danger_intervals(state, rules, extra_bomb, now_tick)
+        # Ein Hafen ist so lange sicher, wie ein voller Zünd- + Flammenzyklus dauert.
+        self.haven_ticks = rules.bomb_fuse_ticks + rules.flame_duration_ticks + 10
+
+    def passable(self, cell: tuple[int, int]) -> bool:
+        x, y = cell
+        return (0 <= x < self.state.width and 0 <= y < self.state.height
+                and self.state.tiles[y][x] == TILE_FREE and cell not in self.blocked)
+
+    def safe(self, cell: tuple[int, int], t0: int, t1: int) -> bool:
+        for s, e in self.intervals.get(cell, ()):
+            if s <= t1 and e >= t0:
+                return False
+        return True
+
+    def haven(self, cell: tuple[int, int], t: int) -> bool:
+        return self.safe(cell, t, t + self.haven_ticks)
+
+    def lethal_from(self, cell: tuple[int, int], t: int) -> int:
+        """Erster Tick ≥ t, ab dem die Zelle tödlich ist (INF = nie)."""
+        first = INF
+        for s, e in self.intervals.get(cell, ()):
+            if e >= t:
+                first = min(first, max(s, t))
+        return first
 
 
-def _step_action(frm: tuple[int, int], to: tuple[int, int]) -> Action:
-    return _STEP[(to[0] - frm[0], to[1] - frm[1])]
+# --- Zeitbewusste Suche --------------------------------------------------------
 
+def _search(world: _World, start: tuple[int, int], t_free: int, step: int, goal,
+            k_max: int = K_MAX):
+    """Breitensuche über (Zelle, Schritt). Warten ist ein Zug (gleiche Zelle).
+
+    ``goal(cell, t)`` → True beendet die Suche. Liefert ``(pfad, gefunden)``; ohne Treffer ist
+    ``pfad`` der Weg zum Zustand, der am längsten überlebt (Fallback).
+    Ein Feld muss sicher sein ab dem Moment, in dem man es betritt, bis man es wieder
+    verlassen kann (BOT_GUIDE.md §7: ein Schritt bindet sofort ans Zielfeld).
+    """
+    start_state = (start, 0)
+    parent: dict = {start_state: None}
+    queue = deque([start_state])
+    deepest = start_state
+    while queue:
+        cell, k = queue.popleft()
+        t = t_free + k * step
+        if goal(cell, t):
+            return _extract_path(parent, (cell, k)), True
+        if k > deepest[1]:
+            deepest = (cell, k)
+        if k >= k_max:
+            continue
+        t2 = t + step
+        # Erst laufen, dann warten: Wer einen Zustand zuerst erreicht, prägt den Pfad – und
+        # frühes Loslaufen lässt mehr Zeitreserve als Abwarten.
+        for dx, dy in DIRS:
+            n = (cell[0] + dx, cell[1] + dy)
+            nxt = (n, k + 1)
+            if nxt in parent or not world.passable(n) or not world.safe(n, t, t2):
+                continue
+            parent[nxt] = (cell, k)
+            queue.append(nxt)
+        nxt = (cell, k + 1)
+        if nxt not in parent and world.safe(cell, t, t2):      # warten
+            parent[nxt] = (cell, k)
+            queue.append(nxt)
+    return _extract_path(parent, deepest), False
+
+
+def _extract_path(parent: dict, node) -> list[tuple[int, int]]:
+    path = []
+    while parent[node] is not None:
+        path.append(node[0])
+        node = parent[node]
+    path.reverse()
+    return path
+
+
+def _first_action(start: tuple[int, int], path: list[tuple[int, int]]) -> Action:
+    if not path or path[0] == start:
+        return Action.NOOP
+    return _STEP[(path[0][0] - start[0], path[0][1] - start[1])]
+
+
+# --- Zielbewertung -------------------------------------------------------------
+
+def _target_values(world: _World, me, enemies) -> dict[tuple[int, int], float]:
+    """Wert je Zelle: Power-up dort, oder guter Bombenplatz (Kisten/Gegner im eigenen Radius)."""
+    state = world.state
+    vals: dict[tuple[int, int], float] = {}
+    for pu in state.powerups.values():
+        c = (pu.x, pu.y)
+        if world.passable(c):
+            vals[c] = max(vals.get(c, 0.0), _POWERUP_VALUE.get(pu.kind, 1.5))
+    enemy_cells = {(e.x, e.y) for e in enemies}
+    banned = _memo["banned"]
+    for y in range(state.height):
+        for x in range(state.width):
+            c = (x, y)
+            if c in banned or not world.passable(c):
+                continue
+            blast = blast_cells(state, x, y, me.flame)
+            crates = sum(1 for (bx, by) in blast if state.tiles[by][bx] == TILE_SOFT)
+            hits = sum(1 for e in enemy_cells if e in blast)
+            v = 0.0
+            if crates:
+                v = 1.0 + 0.5 * (crates - 1)
+            if hits:
+                v = max(v, 2.0 + 0.5 * hits)
+            if v:
+                vals[c] = max(vals.get(c, 0.0), v)
+    return vals
+
+
+def _plan_target(world: _World, me, step: int, t_free: int, enemies) -> list[tuple[int, int]]:
+    """Pfad zum lohnendsten Ziel: Nutzen = Wert / (Schritte + 1), Hysterese fürs letzte Ziel.
+    Leer, wenn es kein sicher erreichbares Ziel gibt."""
+    vals = _target_values(world, me, enemies)
+    if not vals:
+        return []
+    start = (me.x, me.y)
+    vmax = max(vals.values()) * _HYSTERESIS
+    best_util, best_path, best_cell = 0.0, None, None
+
+    start_state = (start, 0)
+    parent: dict = {start_state: None}
+    queue = deque([start_state])
+    while queue:
+        cell, k = queue.popleft()
+        t = t_free + k * step
+        if vmax / (k + 1) <= best_util:
+            break                                     # keine Verbesserung mehr möglich
+        v = vals.get(cell)
+        if v and cell != start and world.safe(cell, t, t + 2 * step):
+            if cell == _memo["target"]:
+                v *= _HYSTERESIS
+            util = v / (k + 1)
+            if util > best_util:
+                best_util, best_path, best_cell = util, _extract_path(parent, (cell, k)), cell
+        if k >= K_MAX:
+            continue
+        t2 = t + step
+        for dx, dy in DIRS:
+            n = (cell[0] + dx, cell[1] + dy)
+            nxt = (n, k + 1)
+            if nxt in parent or not world.passable(n) or not world.safe(n, t, t2):
+                continue
+            parent[nxt] = (cell, k)
+            queue.append(nxt)
+        nxt = (cell, k + 1)
+        if nxt not in parent and world.safe(cell, t, t2):
+            parent[nxt] = (cell, k)
+            queue.append(nxt)
+
+    if best_path is None:
+        return []
+    _memo["target"] = best_cell
+    return best_path
+
+
+def _plan_attack(state: GameState, rules: Rules, me, enemies, step: int,
+                 now_tick: int) -> Action | None:
+    """Bombe legen + ausweichen, wenn es sich lohnt UND die Flucht rechtzeitig gelingt."""
+    my_bombs = sum(1 for b in state.bombs.values() if b.owner == me.id)
+    if my_bombs >= max(1, me.bombs_max):
+        return None
+    sent = _memo["bomb_sent_tick"]
+    if sent is not None and now_tick - sent < BOMB_COOLDOWN_TICKS:
+        return None        # Bombe bereits angefordert – erst auf BOMB_ADD / Ablauf warten
+    cur = (me.x, me.y)
+    blast = blast_cells(state, cur[0], cur[1], me.flame)
+    crates = sum(1 for (bx, by) in blast if state.tiles[by][bx] == TILE_SOFT)
+    hits = sum(1 for e in enemies if (e.x, e.y) in blast)
+    burned = sum(1 for pu in state.powerups.values() if (pu.x, pu.y) in blast)
+    if crates + 3 * hits - burned < 1:
+        return None
+
+    world = _World(state, rules, me.id, extra_bomb=(cur, me.flame), now_tick=now_tick)
+    best = None                                   # (Länge, Richtung, Gesamtpfad ab cur)
+    for dx, dy in DIRS:
+        n = (cur[0] + dx, cur[1] + dy)
+        if not world.passable(n) or not world.safe(n, 0, step):
+            continue
+        path, found = _search(world, n, 0, step, lambda c, t, w=world: w.haven(c, t))
+        if found and (best is None or len(path) < best[0]):
+            best = (len(path), (dx, dy), [n] + path)
+    return (_STEP_BOMB[best[1]], best[2]) if best else None
+
+
+# --- Entscheidung ----------------------------------------------------------------
 
 def decide(track: TrackState, now: float = 0.0) -> Action:
     """Wählt die nächste Aktion des Bots (FR-012/013/014)."""
@@ -115,41 +420,70 @@ def decide(track: TrackState, now: float = 0.0) -> Action:
     me = state.players.get(track.my_id)
     if me is None or not me.alive:
         return Action.NOOP
+    if track.at_tick is not None and track.at_tick == _memo["tick"]:
+        return _replay(now)   # eingefrorener Zustand (z. B. verlorenes DELTA): Plan weiterlaufen
 
-    danger = danger_cells(state)
-    here = (me.x, me.y)
+    action, path, start, step, t_free = _decide(
+        state, track.match.rules if track.match else Rules(), me, track.at_tick)
+    _memo.update({"tick": track.at_tick, "action": action, "plan": path, "plan_start": start,
+                  "plan_t0": now, "plan_step_s": step / _TICKS_PER_SECOND,
+                  "plan_delay_s": t_free / _TICKS_PER_SECOND})
+    if action in _WITHOUT_BOMB and track.at_tick is not None:
+        _memo["bomb_sent_tick"] = track.at_tick
+    return action
 
-    # 1) In Gefahr → schnellstmöglich auf ein sicheres Feld
-    if here in danger:
-        path = bfs(state, here, lambda c: c not in danger, avoid=set())
-        return _step_action(here, path[0]) if path else Action.NOOP
 
-    # 2) Neben Kiste/Gegner und Bombe noch frei → Bombe legen und ausweichen.
-    #    Der erste Schritt bleibt zwangsläufig in der Bombenlinie; entscheidend ist, dass von
-    #    dort ein Weg AUS dem Explosionsbereich existiert (sonst nicht bomben).
-    my_bombs = sum(1 for b in state.bombs.values() if b.owner == track.my_id)
-    if my_bombs < max(1, me.bombs_max) and _adjacent_target(state, me.x, me.y, track.my_id):
-        new_blast = blast_cells(state, me.x, me.y, me.flame or _DEFAULT_RADIUS)
-        unsafe = new_blast | danger
-        for dx, dy in DIRS:
-            nx, ny = me.x + dx, me.y + dy
-            if not walkable(state, nx, ny) or (nx, ny) in danger:
-                continue
-            if (nx, ny) not in unsafe or bfs(state, (nx, ny),
-                                             lambda c: c not in unsafe, avoid=danger):
-                return _STEP_BOMB[(dx, dy)]
+def _replay(now: float) -> Action:
+    """Koppelnavigation: Ohne neuen Server-Zustand den zuletzt geplanten (zeitlich geprüften)
+    Pfad nach Wanduhr weiterverfolgen – ein Schritt je ``plan_step_s``. Eine Bombe wird dabei
+    nie erneut gelegt (Einmal-Aktion); nach dem Pfadende wird gewartet."""
+    plan = _memo["plan"]
+    if not plan:
+        return Action.NOOP
+    # Laufender Schritt (t_free) verzögert den Start; ein Tick Nachlauf, damit die Wiedergabe
+    # nie dem Server vorauseilt (zu frühe Richtung würde einen Schritt überspringen).
+    elapsed = now - _memo["plan_t0"] - _memo.get("plan_delay_s", 0.0) - 1 / _TICKS_PER_SECOND
+    idx = int(max(0.0, elapsed) / _memo["plan_step_s"])
+    if idx >= len(plan):
+        return Action.NOOP
+    prev = _memo["plan_start"] if idx == 0 else plan[idx - 1]
+    nxt = plan[idx]
+    if nxt == prev:
+        return Action.NOOP                            # geplantes Warten
+    return _STEP[(nxt[0] - prev[0], nxt[1] - prev[1])]
 
-    # 3) Sicher erreichbares Power-up einsammeln
-    if state.powerups:
-        targets = {(pu.x, pu.y) for pu in state.powerups.values()}
-        path = bfs(state, here, lambda c: c in targets, avoid=danger)
-        if path:
-            return _step_action(here, path[0])
 
-    # 4) Zur nächsten Kiste laufen (um sie später zu sprengen)
-    path = bfs(state, here, lambda c: _has_soft_neighbor(state, c), avoid=danger)
-    if path:
-        return _step_action(here, path[0])
+def _decide(state: GameState, rules: Rules, me, at_tick) -> Action:
+    step = rules.ticks_to_cross(me.speed)
+    t_free = max(0, step - me.move_progress) if me.moving else 0
+    enemies = [p for p in state.players.values() if p.id != me.id and p.alive]
+    now_tick = at_tick or 0
+    world = _World(state, rules, me.id, now_tick=now_tick)
+    cur = (me.x, me.y)
 
-    # 5) Kein sinnvoller/sicherer Zug → warten
-    return Action.NOOP
+    # abgelaufene Sperren für Bombenplätze löschen
+    if at_tick is not None:
+        _memo["banned"] = {c: t for c, t in _memo["banned"].items() if t > at_tick}
+
+    # 1) Überleben: Ist mein Feld kein sicherer Hafen, sofort zum nächsten Hafen.
+    if not world.haven(cur, t_free):
+        path, found = _search(world, cur, t_free, step, lambda c, t: world.haven(c, t))
+        if found or path:
+            return _first_action(cur, path), path, cur, step, t_free
+        return Action.NOOP, [], cur, step, t_free      # eingeschlossen – nichts hilft mehr
+
+    # 2) Angriff: Bombe legen + ausweichen (nur im Stand möglich).
+    if t_free == 0:
+        attack = _plan_attack(state, rules, me, enemies, step, now_tick)
+        if attack is not None:
+            action, path = attack
+            return action, path, cur, step, t_free
+        # Ich stehe auf einem angepeilten Bombenplatz, kann hier aber nicht sicher bomben →
+        # Platz vorübergehend sperren, sonst stünde ich hier fest.
+        if cur == _memo["target"] and at_tick is not None:
+            _memo["banned"][cur] = at_tick + rules.bomb_fuse_ticks
+            _memo["target"] = None
+
+    # 3) Ziel ansteuern (Power-up, Bombenplatz mit Kisten/Gegnern)
+    path = _plan_target(world, me, step, t_free, enemies)
+    return _first_action(cur, path), path, cur, step, t_free

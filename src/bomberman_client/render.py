@@ -19,8 +19,9 @@ from .state import (
     TILE_WALL,
 )
 
-# Farbmarker pro Spieler-ID (eine gemeinsame Figur, VISUALIZER_GUIDE.md §4.1)
-PLAYER_COLORS = [(70, 130, 240), (230, 70, 70), (70, 200, 90), (230, 200, 60)]
+# Spieler-ID → Farbvariante der Figur (Asset-Pack v2: player_{blue,red,yellow,purple}_*)
+PLAYER_SPRITE = ["blue", "red", "yellow", "purple"]
+PLAYER_COLORS = [(70, 130, 240), (230, 70, 70), (235, 200, 60), (170, 80, 220)]
 _FACING_GROUP = {0: "down", 1: "up", 2: "left", 3: "right"}
 _POWERUP_GROUP = {
     POWERUP_EXTRA_BOMB: "item_bomb_up_hover",
@@ -70,21 +71,20 @@ class Renderer:
                     self._blit(surface, self.assets.frame("__unknown__"), x, y)
 
     def _draw_player(self, surface: pygame.Surface, player, my_id, now: float) -> None:
-        # Farbmarker unter den Füßen
-        color = PLAYER_COLORS[player.id % len(PLAYER_COLORS)]
-        cx = player.x * TILE_SIZE + TILE_SIZE // 2
-        cy = player.y * TILE_SIZE + TILE_SIZE - 8
-        pygame.draw.ellipse(surface, color, (cx - 18, cy - 6, 36, 12))
+        # Eigene Figur hervorheben (die Farbe trägt die Figur selbst)
         if player.id == my_id:
+            cx = player.x * TILE_SIZE + TILE_SIZE // 2
+            cy = player.y * TILE_SIZE + TILE_SIZE - 8
             pygame.draw.ellipse(surface, _TEXT, (cx - 20, cy - 8, 40, 16), 2)
-        # Figur (Blickrichtung aus facing)
+        # Figur: Farbvariante nach Spieler-ID, Blickrichtung aus facing
+        color = PLAYER_SPRITE[player.id % len(PLAYER_SPRITE)]
         direction = _FACING_GROUP.get(player.facing, "down")
         if player.moving:
-            group = f"player_walk_{direction}"
+            group = f"player_{color}_walk_{direction}"
             progress = (player.move_progress % 8) / 8.0
             sprite = self.assets.frame_for_progress(group, progress)
         else:
-            sprite = self.assets.frame_for(f"player_idle_{direction}", now)
+            sprite = self.assets.frame_for(f"player_{color}_idle_{direction}", now)
         self._blit(surface, sprite, player.x, player.y)
 
     def _blit(self, surface: pygame.Surface, sprite: pygame.Surface, gx: int, gy: int) -> None:

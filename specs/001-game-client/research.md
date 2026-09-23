@@ -110,10 +110,10 @@ Zeichentechnik gilt aber genauso für unseren pygame-Client). Client-Zusammenfas
   Zeichenreihenfolge nach `VISUALIZER_GUIDE.md` §4.5: Boden → Kisten → Wände → Power-ups →
   Bomben → Flammen → Spieler (nach `y` sortiert) → Overlay. Sprites, die höher als 64 px sind,
   werden unten-mittig auf der Zelle verankert. Unbekannter Typ → Magenta-Platzhalter.
-- **Vier Spieler, ein Charakter**: Die Assets enthalten nur **eine** Spielerfigur
-  (`VISUALIZER_GUIDE.md` §4.1). Die vier Spieler werden über einen farbigen Ring/Marker unter den
-  Füßen unterschieden (einfacher und sauberer als Umfärben). Der eigene Spieler wird zusätzlich
-  hervorgehoben.
+- **Vier Spielerfarben (Asset-Pack v2)**: Das zweite Asset-Paket liefert vier Figuren
+  `player_{blue,red,yellow,purple}_*` (je 4 Richtungen × 4 Frames). Spieler-ID 0–3 wird fest
+  auf diese Reihenfolge abgebildet; ein Marker ist nur noch für die eigene Figur nötig.
+  (Das erste Paket hatte nur eine Figur; die damalige Marker-Lösung ist damit hinfällig.)
 - **Rationale**: Assets sind bereits 64×64; die Zeichentechnik ist im Visualizer-Guide erprobt.
 - **Alternatives considered**: Sprites per Farbton umfärben (macht Pixelart matschig, laut Guide).
 
@@ -145,17 +145,36 @@ Zeichentechnik gilt aber genauso für unseren pygame-Client). Client-Zusammenfas
 
 ## R12 – Bot-Strategie
 
-- **Decision**: Reine Funktion `decide(track, now) -> action_code`:
-  1. Gefahrenfelder = aktive `flames` + vorhergesagte Explosionskreuze aller Bomben (Reichweite
-     `flame` des Besitzers, an Wänden/Kisten gestoppt), gewichtet nach Restzündzeit (`fuse`).
-  2. Auf Gefahrenfeld → BFS zum nächsten sicheren, erreichbaren Feld; ersten Schritt senden.
-  3. Sonst neben Kiste/Gegner und nach eigener Bombe ein sicheres Feld erreichbar → Kombi-Aktion
-     (Bombe + Schritt in Fluchtrichtung, Codes 6–9).
-  4. Sonst sicher erreichbares Power-up → dorthin laufen.
-  5. Sonst BFS zum nächsten Feld neben einer Kiste → Schritt; sonst `NOOP`.
-- **Rationale**: Deckt FR-012–FR-014 und SC-005 ab; nutzt die Regelkonstanten aus `MATCH_INIT`
-  (nicht hartkodiert). In ~120 Zeilen lösbar und testbar.
-- **Alternatives considered**: A*/Minimax/Lernverfahren (überdimensioniert, Prinzip I).
+- **Decision (v2, zeitbewusst)**: `decide(track, now) -> action_code` auf Basis eines
+  Gefahren-Zeitmodells:
+  1. **Gefahren-Zeitfenster je Zelle** `[start, ende]` (Ticks ab jetzt): aktive `flames`;
+     Explosionen aller Bomben mit dem *aktuellen* `flame` des Besitzers (unbekannt →
+     `rules.max_flame`), an Wänden/Kisten gestoppt; **Kettenreaktionen** per Fixpunkt (eine Bombe
+     im Kreuz einer früher zündenden zündet mit); Sudden Death nach der **exakten Server-
+     Reihenfolge** (`closing_order`: Innenzellen, außen → innen, im Uhrzeigersinn, 1 Zelle/6 Ticks).
+  2. **Bewegungsmodell**: Schritt = `ticks_to_cross(speed)`; die Figur gilt ab Schrittbeginn als
+     auf dem Zielfeld (BOT_GUIDE §7) → ein Feld muss ab Betreten bis zum Verlassen sicher sein.
+  3. **Suche über (Zelle, Schritt)** inkl. Warten; erst laufen, dann warten. Ziel „Hafen" = Zelle,
+     die ab Ankunft einen ganzen Zünd-+Flammenzyklus sicher bleibt. Ohne Hafen: Zug mit der
+     längsten Überlebenszeit.
+  4. Prioritäten: Hafen erreichen → **Bombe + Ausweichen**, wenn Kisten/Gegner im Radius liegen
+     und die Flucht mit der eigenen Reichweite **rechtzeitig** gelingt (Simulation der neuen Bombe
+     inkl. Kettenreaktion) → Ziel mit bestem Nutzen `Wert/(Schritte+1)` (Power-up Flamme 3 >
+     Bombe 2,5 > Tempo 2; Bombenplatz nach Kisten/Gegnern) mit Hysterese; unbrauchbare
+     Bombenplätze werden zeitweise gesperrt.
+  5. Gleicher Server-Tick (eingefrorener Zustand nach verlorenem DELTA, bis zu 0,5 s) →
+     **Koppelnavigation**: den zuletzt geplanten Pfad nach Wanduhr weiterlaufen (1 Schritt je
+     `ticks_to_cross/60` s), **Bombe nie** wiederholen (Einmal-Aktion); neue Bombe erst nach
+     `BOMB_ADD` oder 12 Ticks. Bei 10 % Verlust ist der Zustand ~50 % der Zeit eingefroren –
+     ohne Koppelnavigation blieb der Bot nach dem ersten Fluchtschritt in der Bombenlinie stehen.
+  6. **Zähler-Alterung**: `fuse`/`ticks` kommen nur per KEYFRAME (alle 30 Ticks), DELTAs zählen
+     nicht herunter → Restzeit = Wert − (Tick jetzt − Tick des Stempels), plus 4 Ticks
+     Sicherheitsmarge für Latenz. Ohne das hielt der Bot Bomben bis 0,5 s zu lang für harmlos.
+- **Rationale**: Die v1-Heuristik kannte keine Zeit (jede Bombe sofort tödlich, keine Ketten,
+  Radius-Fallback 2, Flucht ohne Timing) – mit Power-ups (Radius bis 6) wird das fatal. Das
+  Zeitmodell deckt FR-012–FR-014/SC-005 robust ab und bleibt reine, testbare Logik (~350 Zeilen).
+- **Alternatives considered**: Minimax/Monte-Carlo über Gegnerzüge, Lernverfahren
+  (überdimensioniert, Prinzip I); v1-Heuristik (zu trivial, s. o.).
 
 ## R13 – Test-Server (optional)
 

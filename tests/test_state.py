@@ -18,8 +18,9 @@ def test_tile_set_updates_grid():
 
 def test_bomb_add_and_remove():
     gs = make_state()
-    gs.apply_delta([(0x03, {"id": 9, "owner": 0, "x": 1, "y": 1, "fuse": 100})])
+    gs.apply_delta([(0x03, {"id": 9, "owner": 0, "x": 1, "y": 1, "fuse": 100})], tick=500)
     assert 9 in gs.bombs and gs.bombs[9].fuse == 100
+    assert gs.bombs[9].seen_tick == 500                  # Stempel für die Zähler-Alterung
     gs.apply_delta([(0x04, {"id": 9})])
     assert 9 not in gs.bombs
 

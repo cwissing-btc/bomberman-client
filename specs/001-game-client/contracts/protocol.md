@@ -64,11 +64,16 @@ Datensatz-Formate (Player 11 B, Bomb 7 B, Flame 3 B, Power-up 5 B, Delta-Tags `0
 - Alle Byte-Layouts stimmen exakt mit `crates/bomber-protocol` überein (little-endian,
   Frame-Kopf 5 B, Keyframe/Delta/Uplink, Tile-Codes 0/1/2, Power-up 0/1/2, Richtung
   0 down/1 up/2 left/3 right).
-- **Regelblock ist 19 B, nicht 17 B**: Der Server-Encoder schreibt 2+2+1+1+1+1+1+1+1+4+4 = 19
-  Bytes. `RULES_ENCODED_LEN = 17` im Server und die „17 bytes" in `BOT_GUIDE.md` §5.8 sind falsch
-  (harmlos, da Encoder/Decoder symmetrisch sind). Unser Client liest korrekt 19 B.
-- **`WALL_CLOSED` (`0x0D`)**: zusätzliches Delta-Record für Sudden Death (Feld → feste Wand). War
-  in `BOT_GUIDE.md` nicht als eigener Tag gelistet; im Client ergänzt.
+- **Regelblock = 19 B** (2+2+1+1+1+1+1+1+1+4+4). Der Server hatte `RULES_ENCODED_LEN = 17` und
+  „17 bytes" in `BOT_GUIDE.md` §5.8 – gemeldet und im Server-Update vom 2026-09-23 behoben
+  (Konstante, Guide und ein Roundtrip-Test dagegen). Unser Client las von Anfang an 19 B.
+- **`WALL_CLOSED` (`0x0D`)**: Delta-Record für Sudden Death (Feld → feste Wand); kommt zusammen
+  mit einem `TILE_SET → solid` derselben Zelle. War im Guide nicht gelistet – inzwischen in §5.5
+  dokumentiert; im Client von Anfang an behandelt (idempotent zu `TILE_SET`).
+- **Spielmechanik-Update**: Ein Power-up, das eine Explosion gerade aus einer Kiste freilegt,
+  überlebt diese Explosion (vorher wurde es sofort zerstört). Bereits liegende Power-ups werden
+  von Flammen weiterhin zerstört – das Bot-Modell (Strafe fürs Verbrennen liegender Power-ups)
+  bleibt korrekt.
 
 ## 4. Verlustbehandlung (verbindlich, `BOT_GUIDE.md` §6)
 

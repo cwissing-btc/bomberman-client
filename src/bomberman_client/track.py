@@ -64,11 +64,16 @@ class TrackState:
             self.state = frame.data  # type: ignore[assignment]
             self.at_tick = frame.tick
             self.phase = Phase.PLAYING
+            # Zähler-Stempel: fuse/ticks gelten zu diesem Tick (DELTAs zählen sie nicht herunter)
+            for bomb in self.state.bombs.values():
+                bomb.seen_tick = frame.tick
+            for flame in self.state.flames:
+                flame.seen_tick = frame.tick
 
         elif frame.type == FrameType.DELTA:
             delta: Delta = frame.data  # type: ignore[assignment]
             if self.state is not None and self.at_tick == delta.base_tick:
-                self.state.apply_delta(delta.records)
+                self.state.apply_delta(delta.records, frame.tick)
                 self.at_tick = frame.tick
             # sonst: Lücke → verwerfen, auf nächstes KEYFRAME warten
 

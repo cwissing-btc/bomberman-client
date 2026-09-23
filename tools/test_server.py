@@ -39,12 +39,19 @@ def build_map() -> list[list[int]]:
                 tiles[y][x] = TILE_WALL
             elif random.random() < 0.55 and not ((x <= 2 and y <= 2)):
                 tiles[y][x] = TILE_SOFT
+    # Alle vier Startecken samt Nachbarfeldern freiräumen (wie der echte Kartengenerator)
     for (sx, sy) in ((1, 1), (W - 2, 1), (1, H - 2), (W - 2, H - 2)):
-        tiles[sy][sx] = TILE_FREE
+        for dx, dy in ((0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)):
+            x, y = sx + dx, sy + dy
+            if 0 < x < W - 1 and 0 < y < H - 1 and tiles[y][x] != TILE_WALL:
+                tiles[y][x] = TILE_FREE
     return tiles
 
 
 SPAWNS = [(1, 1), (W - 2, 1), (1, H - 2), (W - 2, H - 2)]
+
+
+TPC = 8  # Ticks pro Feld (wie rules_block ticks_per_cell)
 
 
 class Player:
@@ -54,14 +61,17 @@ class Player:
         self.x, self.y = x, y
         self.facing = 0
         self.flame = RADIUS
+        self.moving = False     # Schritt läuft: Aktionen werden ignoriert (BOT_GUIDE §7)
+        self.progress = 0
 
 
 class Bomb:
-    def __init__(self, bid, owner, x, y):
+    def __init__(self, bid, owner, x, y, flame=RADIUS):
         self.id = bid
         self.owner = owner
         self.x, self.y = x, y
         self.fuse = FUSE
+        self.flame = flame
 
 
 def rules_block() -> bytes:
@@ -137,8 +147,9 @@ class Server:
         body = bytes([W, H]) + pack_tiles(self.tiles, W, H)
         body += bytes([len(self.players)])
         for p in self.players.values():
-            body += struct.pack("<BBBBBBBBB", p.id, (1 if p.alive else 0), p.x, p.y,
-                                p.facing, 0, 1, p.flame, 0) + struct.pack("<H", 0)
+            flags = (1 if p.alive else 0) | (2 if p.moving else 0)
+            body += struct.pack("<BBBBBBBBB", p.id, flags, p.x, p.y,
+                                p.facing, p.progress, 1, p.flame, 0) + struct.pack("<H", 0)
         body += struct.pack("<H", len(self.bombs))
         for b in self.bombs.values():
             body += struct.pack("<HBBBH", b.id, b.owner, b.x, b.y, b.fuse)
@@ -151,7 +162,8 @@ class Server:
 
     # --- DELTA (Diff gegen den zuletzt gesendeten Zustand) ---------------
     def snapshot_prev(self):
-        self.prev_players = {p.id: (p.alive, p.x, p.y, p.facing) for p in self.players.values()}
+        self.prev_players = {p.id: (p.alive, p.x, p.y, p.facing, p.moving, p.progress)
+                             for p in self.players.values()}
         self.prev_bombs = {b.id: (b.owner, b.x, b.y, b.fuse) for b in self.bombs.values()}
         self.prev_flames = {(f[0], f[1]) for f in self.flames}
         self.prev_tiles = [row[:] for row in self.tiles]
@@ -161,10 +173,10 @@ class Server:
         count = 0
         # Spieler-Änderungen
         for p in self.players.values():
-            cur = (p.alive, p.x, p.y, p.facing)
+            cur = (p.alive, p.x, p.y, p.facing, p.moving, p.progress)
             if self.prev_players.get(p.id) != cur:
-                flags = (1 if p.alive else 0) | (0 << 1)
-                recs += bytes([0x01, p.id, flags, p.x, p.y, p.facing, 0]); count += 1
+                flags = (1 if p.alive else 0) | (2 if p.moving else 0)
+                recs += bytes([0x01, p.id, flags, p.x, p.y, p.facing, p.progress]); count += 1
         # Bomben hinzugefügt / entfernt
         for b in self.bombs.values():
             if b.id not in self.prev_bombs:
@@ -215,10 +227,14 @@ class Server:
         self.apply_action(p, action)
 
     def apply_action(self, p, action):
+        if p.moving:
+            return                                   # Aktionen während eines Schritts ignorieren
         bomb = action in (Action.BOMB, Action.UP_BOMB, Action.DOWN_BOMB,
                           Action.LEFT_BOMB, Action.RIGHT_BOMB)
-        if bomb and not any(b.x == p.x and b.y == p.y for b in self.bombs.values()):
-            self.bombs[self.next_bomb] = Bomb(self.next_bomb, p.id, p.x, p.y)
+        has_active = any(b.owner == p.id for b in self.bombs.values())   # bombs_max = 1
+        if bomb and not has_active and not any(
+                b.x == p.x and b.y == p.y for b in self.bombs.values()):
+            self.bombs[self.next_bomb] = Bomb(self.next_bomb, p.id, p.x, p.y, p.flame)
             self.next_bomb += 1
         move = {Action.UP: (0, -1, 1), Action.DOWN: (0, 1, 0),
                 Action.LEFT: (-1, 0, 2), Action.RIGHT: (1, 0, 3),
@@ -228,14 +244,22 @@ class Server:
             dx, dy, facing = move
             p.facing = facing
             nx, ny = p.x + dx, p.y + dy
-            if self.tiles[ny][nx] == TILE_FREE and not any(
+            occupied = any(o.alive and o.id != p.id and (o.x, o.y) == (nx, ny)
+                           for o in self.players.values())
+            if self.tiles[ny][nx] == TILE_FREE and not occupied and not any(
                     b.x == nx and b.y == ny for b in self.bombs.values()):
-                p.x, p.y = nx, ny
+                p.x, p.y = nx, ny                    # Zielfeld gilt ab Schrittbeginn
+                p.moving, p.progress = True, 0
 
     def step(self):
         for f in self.flames:
             f[2] -= 1
         self.flames = [f for f in self.flames if f[2] > 0]
+        for p in self.players.values():              # Schritte fortschreiben (TPC Ticks/Feld)
+            if p.moving:
+                p.progress += 1
+                if p.progress >= TPC:
+                    p.moving, p.progress = False, 0
         for b in list(self.bombs.values()):
             b.fuse -= 1
             if b.fuse <= 0:
@@ -246,10 +270,11 @@ class Server:
         self.tick += 1
 
     def detonate(self, b):
-        self.bombs.pop(b.id, None)
+        if self.bombs.pop(b.id, None) is None:
+            return                                   # bereits (per Kette) gezündet
         cells = [(b.x, b.y)]
         for dx, dy in ((0, -1), (0, 1), (-1, 0), (1, 0)):
-            for r in range(1, b.flame if hasattr(b, "flame") else RADIUS + 1):
+            for r in range(1, b.flame + 1):
                 x, y = b.x + dx * r, b.y + dy * r
                 if self.tiles[y][x] == TILE_WALL:
                     break
@@ -259,6 +284,10 @@ class Server:
                     break
         for (x, y) in cells:
             self.flames.append([x, y, FLAME_DUR])
+        # Kettenreaktion: getroffene Bomben zünden im selben Tick mit (BOT_GUIDE §7)
+        for other in list(self.bombs.values()):
+            if (other.x, other.y) in cells:
+                self.detonate(other)
 
     def run(self):
         print(f"Test-Server läuft auf {self.sock.getsockname()} (Strg+C beendet)")
@@ -289,7 +318,10 @@ def main():
     ap.add_argument("--port", type=int, default=47800)
     ap.add_argument("--drop", type=float, default=0.0, help="Anteil verworfener Pakete (0..1)")
     ap.add_argument("--shuffle", action="store_true", help="Reihenfolge eingehender Pakete mischen")
+    ap.add_argument("--seed", type=int, default=None, help="Karten-Seed (reproduzierbare Karte)")
     args = ap.parse_args()
+    if args.seed is not None:
+        random.seed(args.seed)
     try:
         Server(args.host, args.port, args.drop, args.shuffle).run()
     except KeyboardInterrupt:

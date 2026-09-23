@@ -82,6 +82,21 @@ P = {
     "pur_d": (84, 42, 130),
     "pur_m": (132, 76, 194),
     "pur_l": (186, 140, 240),
+    "pur_xl": (222, 188, 255),
+
+    # Weitere Anzugfarben fuer die Spielervarianten.
+    # Gruen fehlt bewusst: der Boden ist gruen, die Figur wuerde darin
+    # untergehen. Wer es trotzdem will, nimmt die grn_*-Rampe oben.
+    "red_d":  (122, 26, 44),
+    "red_m":  (198, 50, 62),
+    "red_l":  (238, 98, 96),
+    "red_xl": (252, 142, 124),   # nicht heller: sonst liest sich die
+                                 # Helmkrone wie Hautfarbe
+
+    "yel_d":  (160, 98, 16),
+    "yel_m":  (228, 160, 30),
+    "yel_l":  (252, 206, 74),
+    "yel_xl": (255, 240, 164),
 }
 
 

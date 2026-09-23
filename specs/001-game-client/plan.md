@@ -21,9 +21,9 @@ Bot, umschaltbar per `B`. Verbindliche Quelle ist `BOT_GUIDE.md`; die Kodierung 
 **Primary Dependencies**: pygame 2.6 (Darstellung, Eingabe); Standardbibliothek `socket`,
 `struct`, `argparse`, `dataclasses`, `enum`, `json` (Atlas laden)
 
-**Assets**: Vom Team in `assets/` (73 Sprites, 64×64, RGBA, Spritesheet + `atlas.json`). Achtung:
-nur **eine** Spielerfigur für alle vier Spieler → Unterscheidung über einen farbigen Marker unter
-den Füßen (`VISUALIZER_GUIDE.md` §4.1). Zwei der fünf Power-up-Sprites (`kick`, `remote`) bleiben
+**Assets**: Vom Team in `assets/` (Pack v2: 121 Sprites, 64×64, RGBA, Spritesheet + `atlas.json`).
+Vier Spielerfarben `player_{blue,red,yellow,purple}_*`, fest auf Spieler-ID 0–3 abgebildet; die
+eigene Figur wird zusätzlich markiert. Zwei der fünf Power-up-Sprites (`kick`, `remote`) bleiben
 ungenutzt.
 
 **Storage**: N/A

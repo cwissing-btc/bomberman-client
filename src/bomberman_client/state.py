@@ -73,6 +73,7 @@ class Bomb:
     x: int
     y: int
     fuse: int
+    seen_tick: int = 0   # Server-Tick, zu dem `fuse` galt (Keyframe/Delta) – DELTAs zählen nicht runter
 
 
 @dataclass
@@ -80,6 +81,7 @@ class Flame:
     x: int
     y: int
     ticks: int
+    seen_tick: int = 0   # Server-Tick, zu dem `ticks` galt
 
 
 @dataclass
@@ -112,11 +114,12 @@ class GameState:
         if 0 <= y < self.height and 0 <= x < self.width:
             self.tiles[y][x] = tile
 
-    def apply_delta(self, records: list[tuple]) -> None:
+    def apply_delta(self, records: list[tuple], tick: int = 0) -> None:
         """Wendet die Delta-Records eines DELTA-Frames an (BOT_GUIDE.md §5.5).
 
         Jedes Record ist ein Tupel ``(tag, payload_dict)`` aus ``protocol.decode``.
-        Unbekannte Tags werden ignoriert (FR-006).
+        ``tick`` stempelt neue Bomben/Flammen (``seen_tick``). Unbekannte Tags werden
+        ignoriert (FR-006).
         """
         for tag, r in records:
             if tag == 0x01:  # PLAYER_STATE
@@ -140,7 +143,7 @@ class GameState:
                     p.speed = r["speed"]
                     p.score = r["score"]
             elif tag == 0x03:  # BOMB_ADD
-                self.bombs[r["id"]] = Bomb(r["id"], r["owner"], r["x"], r["y"], r["fuse"])
+                self.bombs[r["id"]] = Bomb(r["id"], r["owner"], r["x"], r["y"], r["fuse"], tick)
             elif tag == 0x04:  # BOMB_REMOVE
                 self.bombs.pop(r["id"], None)
             elif tag == 0x06:  # TILE_SET
@@ -154,7 +157,7 @@ class GameState:
                 if p is not None:
                     p.alive = False
             elif tag == 0x0A:  # FLAME_ADD
-                self.flames.append(Flame(r["x"], r["y"], r["ticks"]))
+                self.flames.append(Flame(r["x"], r["y"], r["ticks"], tick))
             elif tag == 0x0B:  # FLAME_REMOVE
                 self.flames = [f for f in self.flames if (f.x, f.y) != (r["x"], r["y"])]
             elif tag == 0x0C:  # TIMER
