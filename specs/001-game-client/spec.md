@@ -153,6 +153,9 @@ Kisten sprengt und meist nicht in Flammen läuft.
   Wirkungsbereich zündender Bomben meiden, sofern ein sicherer Zug existiert.
 - **FR-014**: Der Bot SOLL per Kombi-Aktion eine Bombe legen und ausweichen, wenn er neben einer
   Kiste oder einem Gegner steht und danach ein sicheres Feld erreichbar ist.
+- **FR-014b**: Der Bot MUSS rechtzeitig vor Sudden Death (mind. 20 s) randnahe Ziele meiden,
+  bevorzugt Felder aufsuchen, die noch lange offen bleiben, und ohne Ziel von bald schließenden
+  Feldern nach innen ziehen (Schließ-Reihenfolge des Servers).
 - **FR-015**: Der Client MUSS „Verbindung verloren“ anzeigen, wenn 3 s lang kein Frame eintraf.
 - **FR-016**: Der Client MUSS Spielstatus anzeigen: eigener Tod (`PLAYER_DEATH`), Matchende
   (`MATCH_END`) mit Gewinner/Platzierung, danach Rückkehr in die Lobby-Anzeige.

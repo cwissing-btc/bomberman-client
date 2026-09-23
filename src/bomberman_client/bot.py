@@ -47,6 +47,9 @@ SUDDEN_DEATH_TICKS_PER_CELL = 6  # BOT_GUIDE.md §7
 _POWERUP_VALUE = {POWERUP_FLAME: 3.0, POWERUP_EXTRA_BOMB: 2.5, POWERUP_SPEED: 2.0}
 _HYSTERESIS = 1.25              # Bonus für das zuletzt verfolgte Ziel (kein Flip-Flop)
 BOMB_COOLDOWN_TICKS = 12        # nach einem Bombenbefehl auf BOMB_ADD warten, statt nachzulegen
+MOVE_SETTLE_TICKS = 2           # nach einer gesendeten Bewegung so lange nicht bomben
+SD_PREP_TICKS = 20 * 60         # so lange vor Sudden Death beginnt der Rückzug vom Rand
+SD_DEEP_TICKS = 8 * 60          # „tiefer" Hafen: wird frühestens in 8 s zugemauert
 
 # Bombe ist eine Einmal-Aktion: bei unverändertem Zustand nur die Bewegung wiederholen.
 _WITHOUT_BOMB = {Action.BOMB: Action.NOOP, Action.UP_BOMB: Action.UP,
@@ -65,7 +68,8 @@ def reset() -> None:
     _memo.clear()
     _memo.update({"tick": None, "action": Action.NOOP, "plan": [], "plan_start": None,
                   "plan_t0": 0.0, "plan_step_s": 8 / _TICKS_PER_SECOND, "plan_delay_s": 0.0,
-                  "target": None, "banned": {}, "bomb_sent_tick": None})
+                  "target": None, "banned": {}, "bomb_sent_tick": None,
+                  "last_move_tick": None, "match_id": None})
 
 
 reset()
@@ -106,6 +110,17 @@ def danger_cells(state: GameState) -> set[tuple[int, int]]:
 
 
 # --- Gefahrenmodell ----------------------------------------------------------
+
+def _match_tick(state: GameState, rules: Rules, now_tick: int = 0) -> int | None:
+    """Aktueller Match-Tick. Der Frame-Tick IST der Match-Tick (der Server vergleicht
+    ``game.tick`` mit ``sudden_death_tick``) – ``ticks_remaining`` ist nur per Keyframe aktuell
+    und bis zu 29 Ticks veraltet (ein Bot starb dadurch exakt auf der nächsten Spiral-Zelle)."""
+    if now_tick:
+        return now_tick
+    if not rules.round_time_ticks or not state.ticks_remaining:
+        return None
+    return rules.round_time_ticks - state.ticks_remaining
+
 
 def _radius_of(state: GameState, owner_id: int, rules: Rules) -> int:
     owner = state.players.get(owner_id)
@@ -162,7 +177,7 @@ def _danger_intervals(state: GameState, rules: Rules,
         for c in blast:
             add(c, det - margin, det + rules.flame_duration_ticks + margin)
 
-    _sudden_death_intervals(state, rules, add)
+    _sudden_death_intervals(state, rules, add, now_tick)
     return iv
 
 
@@ -194,12 +209,13 @@ def closing_order(width: int, height: int) -> list[tuple[int, int]]:
     return order
 
 
-def _sudden_death_intervals(state: GameState, rules: Rules, add) -> None:
+def _sudden_death_intervals(state: GameState, rules: Rules, add, now_tick: int = 0) -> None:
     """Jede Innenzelle wird ab ihrem exakten Schließzeitpunkt dauerhaft tödlich."""
     total = rules.round_time_ticks
-    if not total or rules.sudden_death_tick >= total or not state.ticks_remaining:
+    match_tick = _match_tick(state, rules, now_tick)
+    if not total or rules.sudden_death_tick >= total or match_tick is None:
         return
-    now_tick = total - state.ticks_remaining
+    now_tick = match_tick
     horizon = rules.bomb_fuse_ticks * 4
     for i, cell in enumerate(closing_order(state.width, state.height)):
         start = rules.sudden_death_tick + SUDDEN_DEATH_TICKS_PER_CELL * i - now_tick
@@ -249,6 +265,14 @@ class _World:
                 self.blocked.add((p.x, p.y))
         self.intervals = _danger_intervals(state, rules, extra_bomb, now_tick)
         self.threat = threat_cells(state, my_id)      # Gegner-Reichweiten (Power-ups!)
+        # Sudden Death: wann (relativ, Ticks) jede Innenzelle zugemauert wird
+        self.closing: dict[tuple[int, int], int] = {}
+        self.sd_prep = False
+        match_tick = _match_tick(state, rules, now_tick)
+        if match_tick is not None and rules.sudden_death_tick < rules.round_time_ticks:
+            for i, cell in enumerate(closing_order(state.width, state.height)):
+                self.closing[cell] = rules.sudden_death_tick + SUDDEN_DEATH_TICKS_PER_CELL * i - match_tick
+            self.sd_prep = rules.sudden_death_tick - match_tick <= SD_PREP_TICKS
         # Ein Hafen ist so lange sicher, wie ein voller Zünd- + Flammenzyklus dauert.
         self.haven_ticks = rules.bomb_fuse_ticks + rules.flame_duration_ticks + 10
 
@@ -269,6 +293,14 @@ class _World:
     def quiet_haven(self, cell: tuple[int, int], t: int) -> bool:
         """Hafen außerhalb jeder gegnerischen Bombenlinie."""
         return cell not in self.threat and self.haven(cell, t)
+
+    def time_to_close(self, cell: tuple[int, int]) -> int:
+        """Ticks, bis Sudden Death die Zelle zumauert (INF = nie/unbekannt)."""
+        return self.closing.get(cell, INF)
+
+    def deep_haven(self, cell: tuple[int, int], t: int) -> bool:
+        """Hafen, der auch vom einrückenden Rand noch lange verschont bleibt."""
+        return self.haven(cell, t) and self.time_to_close(cell) - t >= SD_DEEP_TICKS
 
     def lethal_from(self, cell: tuple[int, int], t: int) -> int:
         """Erster Tick ≥ t, ab dem die Zelle tödlich ist (INF = nie)."""
@@ -333,11 +365,40 @@ def _escape_path(world: _World, start: tuple[int, int], t_free: int, step: int):
     """Nächster Hafen – bevorzugt außerhalb gegnerischer Bombenlinien, wenn das höchstens zwei
     Schritte mehr kostet. Liefert (pfad, gefunden)."""
     path, found = _search(world, start, t_free, step, lambda c, t: world.haven(c, t))
+    if found and world.sd_prep:
+        deep, ok = _search(world, start, t_free, step, lambda c, t: world.deep_haven(c, t))
+        if ok and len(deep) <= len(path) + 3:
+            return deep, True                  # Rand rückt ein: lieber weiter nach innen
     if found and world.threat:
         quiet, ok = _search(world, start, t_free, step, lambda c, t: world.quiet_haven(c, t))
         if ok and len(quiet) <= len(path) + 2:
             return quiet, True
     return path, found
+
+
+def _latest_closing_path(world: _World, start: tuple[int, int], t_free: int, step: int):
+    """Rückfallebene für Sudden Death: Pfad zur sicher erreichbaren Zelle, die am spätesten
+    zugemauert wird (relativ zur Ankunft) – wenn kein „tiefer" Hafen mehr existiert."""
+    start_state = (start, 0)
+    parent: dict = {start_state: None}
+    queue = deque([start_state])
+    best = (world.time_to_close(start) - t_free, start_state)
+    while queue:
+        cell, k = queue.popleft()
+        t = t_free + k * step
+        margin = world.time_to_close(cell) - t
+        if margin > best[0] and world.safe(cell, t, t + step):
+            best = (margin, (cell, k))
+        if k >= K_MAX:
+            continue
+        for dx, dy in DIRS:
+            n = (cell[0] + dx, cell[1] + dy)
+            nxt = (n, k + 1)
+            if nxt in parent or not world.passable(n) or not world.safe(n, t, t + step):
+                continue
+            parent[nxt] = (cell, k)
+            queue.append(nxt)
+    return _extract_path(parent, best[1]) if best[1] != start_state else []
 
 
 def _first_action(start: tuple[int, int], path: list[tuple[int, int]]) -> Action:
@@ -376,6 +437,9 @@ def _target_values(world: _World, me, enemies) -> dict[tuple[int, int], float]:
             if v:
                 if c in world.threat:
                     v *= 0.6                        # in gegnerischer Bombenlinie nicht verweilen
+                if world.sd_prep:
+                    # Zellen, die bald zugemauert werden, verlieren an Wert (Rand meiden)
+                    v *= min(1.0, max(0.15, world.time_to_close(c) / SD_PREP_TICKS))
                 vals[c] = max(vals.get(c, 0.0), v)
     return vals
 
@@ -427,8 +491,12 @@ def _plan_target(world: _World, me, step: int, t_free: int, enemies) -> list[tup
 
 
 def _plan_attack(state: GameState, rules: Rules, me, enemies, step: int,
-                 now_tick: int) -> Action | None:
-    """Bombe legen + ausweichen, wenn es sich lohnt UND die Flucht rechtzeitig gelingt."""
+                 now_tick: int):
+    """Bombe legen + ausweichen, wenn es sich lohnt UND die Flucht rechtzeitig gelingt.
+
+    Liefert ``(Aktion, Pfad)`` oder ``None``. ``(NOOP, [])`` bedeutet: guter Platz, aber es
+    wurde eben noch eine Bewegung gesendet – erst zur Ruhe kommen, dann bomben (sonst würde die
+    Bombe auf dem Zielfeld eines vom Server gerade noch angenommenen Schritts landen)."""
     my_bombs = sum(1 for b in state.bombs.values() if b.owner == me.id)
     if my_bombs >= max(1, me.bombs_max):
         return None
@@ -452,7 +520,12 @@ def _plan_attack(state: GameState, rules: Rules, me, enemies, step: int,
         path, found = _escape_path(world, n, 0, step)
         if found and (best is None or len(path) < best[0]):
             best = (len(path), (dx, dy), [n] + path)
-    return (_STEP_BOMB[best[1]], best[2]) if best else None
+    if best is None:
+        return None
+    last_move = _memo["last_move_tick"]
+    if last_move is not None and now_tick - last_move < MOVE_SETTLE_TICKS:
+        return Action.NOOP, []                    # Latenz-Wettlauf vermeiden: erst stehen
+    return _STEP_BOMB[best[1]], best[2]
 
 
 # --- Entscheidung ----------------------------------------------------------------
@@ -465,8 +538,12 @@ def decide(track: TrackState, now: float = 0.0) -> Action:
     me = state.players.get(track.my_id)
     if me is None or not me.alive:
         return Action.NOOP
+    _forget_previous_match(track)
     if track.at_tick is not None and track.at_tick == _memo["tick"]:
-        return _replay(now)   # eingefrorener Zustand (z. B. verlorenes DELTA): Plan weiterlaufen
+        action = _replay(now)  # eingefrorener Zustand (z. B. verlorenes DELTA): Plan weiterlaufen
+        if action in _STEP.values():
+            _memo["last_move_tick"] = track.at_tick
+        return action
 
     action, path, start, step, t_free = _decide(
         state, track.match.rules if track.match else Rules(), me, track.at_tick)
@@ -475,7 +552,25 @@ def decide(track: TrackState, now: float = 0.0) -> Action:
                   "plan_delay_s": t_free / _TICKS_PER_SECOND})
     if action in _WITHOUT_BOMB and track.at_tick is not None:
         _memo["bomb_sent_tick"] = track.at_tick
+    if action in _STEP.values() and track.at_tick is not None:
+        _memo["last_move_tick"] = track.at_tick
     return action
+
+
+def _forget_previous_match(track: TrackState) -> None:
+    """Neues Match (andere Match-ID oder Tick springt zurück) → Gedächtnis löschen.
+
+    Alle gemerkten Ticks (``bomb_sent_tick``, ``last_move_tick``, Sperren) beziehen sich auf den
+    Match-Tick, der pro Match bei 0 beginnt. Reste aus dem Vormatch (z. B. Bombe bei Tick 4000)
+    ließen den Bot im nächsten Match minutenlang nicht bomben („Cooldown“ 4000 − 30 < 12) und
+    auf gesperrten Plätzen stehen – beobachtet als „Bot bleibt am Levelanfang stehen“."""
+    match_id = track.match.match_id if track.match is not None else None
+    new_match = match_id != _memo["match_id"]
+    went_back = (track.at_tick is not None and _memo["tick"] is not None
+                 and track.at_tick < _memo["tick"])
+    if new_match or went_back:
+        reset()
+        _memo["match_id"] = match_id
 
 
 def _replay(now: float) -> Action:
@@ -538,6 +633,12 @@ def _decide(state: GameState, rules: Rules, me, at_tick) -> Action:
 
     # 3) Ziel ansteuern (Power-up, Bombenplatz mit Kisten/Gegnern)
     path = _plan_target(world, me, step, t_free, enemies)
+    if not path and world.sd_prep and world.time_to_close(cur) < SD_DEEP_TICKS:
+        # Kein Ziel und mein Feld wird bald zugemauert: rechtzeitig nach innen ziehen –
+        # notfalls zur Zelle, die am spätesten schließt.
+        path, found = _search(world, cur, t_free, step, lambda c, t: world.deep_haven(c, t))
+        if not found:
+            path = _latest_closing_path(world, cur, t_free, step)
     if not path and cur in world.threat:
         # Kein Ziel, aber ich stehe in einer gegnerischen Bombenlinie: lieber heraustreten.
         path, found = _search(world, cur, t_free, step, lambda c, t: world.quiet_haven(c, t))

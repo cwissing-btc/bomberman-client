@@ -197,6 +197,7 @@ def _decode_match_init(d: bytes) -> MatchInfo | None:
     # 5 Kopf, 5 version, 6 match_id u32, 10 seed u64, 18 my_id, 19 N, 20 W, 21 H
     if len(d) < 22:
         return None
+    match_id = struct.unpack_from("<I", d, 6)[0]
     my_id = d[18]
     n = d[19]
     width = d[20]
@@ -209,7 +210,8 @@ def _decode_match_init(d: bytes) -> MatchInfo | None:
         spawns.append((d[off], d[off + 1]))
         off += 2
     rules, off = _decode_rules(d, off)
-    return MatchInfo(width=width, height=height, spawns=spawns, rules=rules, my_id=my_id)
+    return MatchInfo(width=width, height=height, spawns=spawns, rules=rules, my_id=my_id,
+                     match_id=match_id)
 
 
 def _decode_keyframe(d: bytes) -> GameState | None:

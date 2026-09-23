@@ -173,6 +173,29 @@ Zeichentechnik gilt aber genauso für unseren pygame-Client). Client-Zusammenfas
      `bombs_max` − aktive Bomben): dort nicht verweilen (Zielwert ×0,6), Flucht bevorzugt in
      einen Hafen außerhalb (≤ 2 Schritte Umweg), ohne Ziel aus der Linie treten. Eingekesselte
      Gegner (≤ 1 begehbarer Nachbar) in eigener Reichweite: Angriffswert +1,5.
+  8. **Sudden Death proaktiv**: Ab 20 s vor `sudden_death_tick` (Match-Tick aus
+     `round_time_ticks − ticks_remaining`) werden Ziele nach ihrer Schließzeit abgewertet
+     (Faktor `min(1, t_close/20 s)`, mind. 0,15), Fluchten bevorzugen „tiefe" Häfen (schließen
+     frühestens in 8 s, ≤ 3 Schritte Umweg), und ohne Ziel zieht der Bot von bald schließenden
+     Randfeldern nach innen. Grundlage ist die exakte Server-Reihenfolge (`closing_order`).
+  9. **Bomben nur im Stand ohne offene Bewegung**: Eine in den letzten 2 Ticks gesendete
+     Richtung kann der Server am Schrittende noch annehmen – die Bombe läge dann auf dem
+     Zielfeld des Schritts (im Fluchtweg). Post-mortem der Live-Aufzeichnung: zwei identische
+     Startecken-Tode genau dadurch. Match-Tick = Frame-Tick (nicht `ticks_remaining`, das bis
+     zu 29 Ticks veraltet ist – ein Tod exakt auf der nächsten Spiral-Zelle).
+  10. **Gedächtnis gilt nur für ein Match**: Alle gemerkten Ticks (`bomb_sent_tick`,
+     `last_move_tick`, Platzsperren) sind Match-Ticks, die pro Match bei 0 beginnen. Ohne Reset
+     ließ ein Rest aus dem Vormatch (Bombe bei Tick ~450) im nächsten Match den Bomben-Cooldown
+     nie ablaufen (450 − 30 < 12) → keine Bombe, gesperrte Plätze, Bot stand am Levelanfang
+     (live gegen den echten Server reproduziert: Match 1 normal, Match 2 nur 47 von 480 Ticks
+     Bewegung). Reset bei neuer `match_id` (aus MATCH_INIT) oder Ticksprung rückwärts.
+  11. **MATCH_INIT-Wiederholung**: Der Server sendet MATCH_INIT auf 5 Ticks in Folge, das
+     KEYFRAME aber nur bei Tick 0. Wer bei jedem MATCH_INIT den Zustand verwirft (Referenz-Code
+     im BOT_GUIDE), verliert ihn bei Tick 1–4 und steht bis zum KEYFRAME bei Tick 30 ohne
+     Zustand (0,5 s Stillstand je Matchstart). Dieselbe `match_id` behält den Zustand.
+  12. **Moderator-`end` sendet kein MATCH_END** (Server `end_match` setzt nur den Lobby-Zustand).
+     Ein LOBBY_STATUS ≠ running während PLAYING beendet das Match daher clientseitig; sonst blieb
+     der Client auf altem Zustand in PLAYING.
   6. **Zähler-Alterung**: `fuse`/`ticks` kommen nur per KEYFRAME (alle 30 Ticks), DELTAs zählen
      nicht herunter → Restzeit = Wert − (Tick jetzt − Tick des Stempels), plus 4 Ticks
      Sicherheitsmarge für Latenz. Ohne das hielt der Bot Bomben bis 0,5 s zu lang für harmlos.

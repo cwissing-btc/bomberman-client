@@ -206,7 +206,7 @@ class Server:
 
     # --- Logik -----------------------------------------------------------
     def handle(self, data, addr):
-        if data == b"\xff\xff":                      # HELLO
+        if data[:2] == b"\xff\xff":                  # HELLO (optional mit Namen, BOT_GUIDE)
             if addr not in self.clients:
                 pid = len(self.clients)
                 if pid > 3:

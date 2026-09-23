@@ -49,6 +49,7 @@ class MatchInfo:
     spawns: list[tuple[int, int]]
     rules: Rules
     my_id: int
+    match_id: int = 0   # unterscheidet ein neues Match von einer Wiederholung desselben MATCH_INIT
 
 
 @dataclass

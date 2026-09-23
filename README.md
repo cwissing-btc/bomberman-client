@@ -63,6 +63,11 @@ Der Bot steuert nur die **eigene** Figur und plant **zeitbewusst**:
   Zündzeit gelingt – auch bei großem eigenen Radius. Immer per Kombi-Aktion (Bombe + Schritt).
 - Ziele: Power-ups (Flamme > Bombe > Tempo) und Bombenplätze mit vielen Kisten/Gegnern, mit
   Hysterese gegen Hin-und-her-Laufen.
+- Sudden Death: Ab 20 s vor dem Einrücken des Rands verliert alles Randnahe an Wert, Fluchten
+  zielen auf Felder, die noch lange offen bleiben, und ohne Ziel zieht der Bot nach innen –
+  auf Basis der exakten Schließ-Reihenfolge des Servers.
+- Matchwechsel: Das Bot-Gedächtnis (Cooldowns, Sperren, Ziel) wird pro Match zurückgesetzt;
+  wiederholte MATCH_INIT-Frames desselben Matches löschen den Zustand nicht.
 - Gegner-Fähigkeiten: Reichweite und freie Bomben jedes Gegners ergeben **Bedrohungszonen**
   (was er *jetzt* treffen könnte) – dort verweilt der Bot nicht, flieht lieber in Häfen
   außerhalb und schlägt bei eingekesselten Gegnern in eigener Reichweite bevorzugt zu.

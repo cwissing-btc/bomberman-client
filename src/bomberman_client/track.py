@@ -17,6 +17,9 @@ from .protocol import (
 )
 from .state import GameState, MatchInfo
 
+LOBBY_RUNNING = 3      # LOBBY_STATUS.state (BOT_GUIDE.md §5.2)
+LOBBY_MATCH_OVER = 4
+
 
 class Phase:
     CONNECTING = "connecting"
@@ -49,16 +52,30 @@ class TrackState:
                 self.phase = Phase.LOBBY
 
         elif frame.type == FrameType.LOBBY_STATUS:
-            self.lobby = frame.data  # type: ignore[assignment]
+            lobby: LobbyStatus = frame.data  # type: ignore[assignment]
+            self.lobby = lobby
             if self.phase != Phase.PLAYING:
                 self.phase = Phase.LOBBY
+            elif lobby.state != LOBBY_RUNNING:
+                # Während eines laufenden Matches sendet der Server keinen LOBBY_STATUS. Kommt
+                # einer, ist das Match vorbei – auch ohne MATCH_END (Moderator-„end" sendet
+                # keins). Sonst bliebe der Client in PLAYING und spielte auf altem Zustand weiter.
+                self.phase = Phase.MATCH_OVER if lobby.state == LOBBY_MATCH_OVER else Phase.LOBBY
 
         elif frame.type == FrameType.MATCH_INIT:
-            self.match = frame.data  # type: ignore[assignment]
-            self.state = None
-            self.at_tick = None
-            self.result = None
+            info: MatchInfo = frame.data  # type: ignore[assignment]
+            repeat = (self.match is not None and self.match.match_id == info.match_id
+                      and self.state is not None)
+            self.match = info
             self.phase = Phase.PLAYING
+            if not repeat:
+                # Neues Match: alles Dynamische verwerfen, auf das erste KEYFRAME warten.
+                # MATCH_INIT wird 5 Ticks in Folge wiederholt (Zustellgarantie); dieselbe Match-ID
+                # darf den bereits gehaltenen Zustand nicht löschen – sonst stünde der Client bis
+                # zum nächsten KEYFRAME (30 Ticks) ohne Zustand und der Bot am Start still.
+                self.state = None
+                self.at_tick = None
+                self.result = None
 
         elif frame.type == FrameType.KEYFRAME:
             self.state = frame.data  # type: ignore[assignment]

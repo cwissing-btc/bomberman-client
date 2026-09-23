@@ -226,6 +226,60 @@ def test_escape_prefers_haven_outside_enemy_line():
     assert bot.decide(make_track(state)) in (Action.DOWN, Action.RIGHT)
 
 
+def test_sudden_death_prep_devalues_edge_targets():
+    # 5 s vor Sudden Death: Bombenplatz am Rand (2,3) ist weniger wert als der in der Mitte (4,3).
+    rules = Rules(round_time_ticks=10800, sudden_death_tick=7200)
+    state = GameState(9, 7, open_field(9, 7))
+    state.tiles[3][1] = TILE_SOFT                        # Kiste am linken Rand
+    state.tiles[3][5] = TILE_SOFT                        # Kiste weiter innen
+    state.players[0] = me_at(3, 3)
+    state.ticks_remaining = 10800 - (7200 - 5 * 60)
+    world = bot._World(state, rules, 0, now_tick=7200 - 300)
+    assert world.sd_prep
+    vals = bot._target_values(world, state.players[0], [])
+    assert vals[(2, 3)] < vals[(4, 3)]
+    # Ohne Sudden-Death-Nähe sind beide Plätze gleich viel wert
+    state.ticks_remaining = 10800 - 600
+    calm = bot._World(state, rules, 0, now_tick=600)
+    assert not calm.sd_prep
+    v2 = bot._target_values(calm, state.players[0], [])
+    assert v2[(2, 3)] == v2[(4, 3)]
+
+
+def test_sudden_death_prep_moves_inward_without_target():
+    # 5 s vor Sudden Death ohne Ziel auf einem Randfeld → nach innen (rechts/unten) ziehen.
+    rules = Rules(round_time_ticks=10800, sudden_death_tick=7200)
+    state = GameState(9, 7, open_field(9, 7))
+    state.players[0] = me_at(1, 1)
+    state.ticks_remaining = 10800 - (7200 - 300)
+    assert bot.decide(make_track(state, rules=rules)) in (Action.RIGHT, Action.DOWN)
+
+
+def test_no_bomb_right_after_sending_a_move():
+    # Eben noch eine Richtung gesendet → der Server könnte sie am Schrittende annehmen und die
+    # Bombe läge auf dem Zielfeld. Erst nach MOVE_SETTLE_TICKS ohne Bewegung wieder bomben.
+    state = GameState(7, 5, open_field(7, 5))
+    state.tiles[2][4] = TILE_SOFT
+    state.players[0] = me_at(3, 2)
+    track = make_track(state)
+    track.at_tick = 100
+    bot._memo["last_move_tick"] = 99
+    assert bot.decide(track) not in BOMBS
+    track.at_tick = 99 + bot.MOVE_SETTLE_TICKS
+    assert bot.decide(track) in BOMBS[1:]
+
+
+def test_match_tick_prefers_frame_tick_over_stale_timer():
+    # ticks_remaining ist nur per Keyframe aktuell (hier 24 Ticks alt); der Frame-Tick zählt.
+    rules = Rules(round_time_ticks=10800, sudden_death_tick=7200)
+    state = GameState(15, 13, open_field(15, 13))
+    state.ticks_remaining = 10800 - 7680
+    assert bot._match_tick(state, rules, now_tick=7704) == 7704
+    world = bot._World(state, rules, 0, now_tick=7704)
+    assert world.time_to_close(bot.closing_order(15, 13)[84]) == 0    # schließt genau jetzt
+    assert bot._match_tick(state, rules) == 7680                     # Fallback ohne Frame-Tick
+
+
 def test_prefers_reachable_powerup():
     state = GameState(9, 5, open_field(9, 5))
     state.players[0] = me_at(2, 2)
@@ -252,3 +306,49 @@ def test_sudden_death_moves_inward():
     state.ticks_remaining = 10800 - (7200 - 30)
     state.players[0] = me_at(1, 1)
     assert bot.decide(make_track(state, rules=rules)) in (Action.RIGHT, Action.DOWN)
+
+
+# --- Gedächtnis gilt nur für ein Match ------------------------------------------------
+
+def _crate_corner_state():
+    """Ich stehe bei (1,2) neben einer Kiste (1,3); Flucht über (1,1) nach (2,1) möglich."""
+    tiles = open_field(6, 6)
+    tiles[3][1] = TILE_SOFT
+    return GameState(6, 6, tiles, players={0: me_at(1, 2, flame=1)})
+
+
+def _track_for_match(state, match_id, tick):
+    t = make_track(state, rules=Rules())
+    t.match.match_id = match_id
+    t.at_tick = tick
+    return t
+
+
+def test_memory_of_previous_match_does_not_block_bombing():
+    """Regression: bomb_sent_tick/last_move_tick aus dem Vormatch (z. B. Tick 4000) ließen im
+    neuen Match (Tick 30) den Cooldown nie ablaufen → keine Bombe, Bot stand am Start."""
+    bot._memo.update({"tick": 4000, "bomb_sent_tick": 3990, "last_move_tick": 3999,
+                      "target": (1, 2), "banned": {(1, 2): 4100, (2, 1): 4050},
+                      "match_id": 1})
+    action = bot.decide(_track_for_match(_crate_corner_state(), match_id=2, tick=30))
+    assert action in BOMBS
+    assert bot._memo["match_id"] == 2
+    assert bot._memo["banned"] == {}
+
+
+def test_tick_going_backwards_resets_memory():
+    """Auch ohne Match-ID (z. B. Test-Server, gleiche ID) verrät ein Ticksprung rückwärts das
+    neue Match."""
+    bot._memo.update({"tick": 4000, "bomb_sent_tick": 3990, "last_move_tick": 3999,
+                      "match_id": 1})
+    action = bot.decide(_track_for_match(_crate_corner_state(), match_id=1, tick=30))
+    assert action in BOMBS
+
+
+def test_memory_is_kept_within_a_match():
+    track = _track_for_match(_crate_corner_state(), match_id=1, tick=30)
+    assert bot.decide(track) in BOMBS
+    assert bot._memo["bomb_sent_tick"] == 30
+    track.at_tick = 31
+    bot.decide(track)                       # gleiches Match: Cooldown bleibt wirksam
+    assert bot._memo["bomb_sent_tick"] == 30
