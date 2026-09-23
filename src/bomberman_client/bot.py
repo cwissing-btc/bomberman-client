@@ -208,8 +208,33 @@ def _sudden_death_intervals(state: GameState, rules: Rules, add) -> None:
         add(cell, start, INF)
 
 
+def bomb_capacity(state: GameState, player_id: int) -> int:
+    """Wie viele Bomben der Spieler gerade noch legen kann (bombs_max − aktive Bomben)."""
+    p = state.players.get(player_id)
+    if p is None:
+        return 0
+    active = sum(1 for b in state.bombs.values() if b.owner == player_id)
+    return max(0, max(1, p.bombs_max) - active)
+
+
+def threat_cells(state: GameState, my_id: int) -> set[tuple[int, int]]:
+    """Zellen, die ein lebender Gegner mit freier Bombe *sofort* treffen könnte (sein Kreuz mit
+    seiner aktuellen Reichweite). Keine sichere Gefahr, aber kein Ort zum Verweilen."""
+    cells: set[tuple[int, int]] = set()
+    for p in state.players.values():
+        if p.id == my_id or not p.alive or bomb_capacity(state, p.id) == 0:
+            continue
+        cells |= blast_cells(state, p.x, p.y, p.flame)
+    return cells
+
+
+def is_cornered(state: GameState, x: int, y: int) -> bool:
+    """Höchstens ein begehbares Nachbarfeld → kaum Fluchtwege (lohnendes Ziel)."""
+    return sum(1 for dx, dy in DIRS if walkable(state, x + dx, y + dy)) <= 1
+
+
 class _World:
-    """Sicht des Bots auf einen Zustand: Passierbarkeit + Gefahren-Zeitfenster."""
+    """Sicht des Bots auf einen Zustand: Passierbarkeit, Gefahren-Zeitfenster, Bedrohungszonen."""
 
     def __init__(self, state: GameState, rules: Rules, my_id: int,
                  extra_bomb: tuple[tuple[int, int], int] | None = None,
@@ -223,6 +248,7 @@ class _World:
             if p.id != my_id and p.alive:
                 self.blocked.add((p.x, p.y))
         self.intervals = _danger_intervals(state, rules, extra_bomb, now_tick)
+        self.threat = threat_cells(state, my_id)      # Gegner-Reichweiten (Power-ups!)
         # Ein Hafen ist so lange sicher, wie ein voller Zünd- + Flammenzyklus dauert.
         self.haven_ticks = rules.bomb_fuse_ticks + rules.flame_duration_ticks + 10
 
@@ -239,6 +265,10 @@ class _World:
 
     def haven(self, cell: tuple[int, int], t: int) -> bool:
         return self.safe(cell, t, t + self.haven_ticks)
+
+    def quiet_haven(self, cell: tuple[int, int], t: int) -> bool:
+        """Hafen außerhalb jeder gegnerischen Bombenlinie."""
+        return cell not in self.threat and self.haven(cell, t)
 
     def lethal_from(self, cell: tuple[int, int], t: int) -> int:
         """Erster Tick ≥ t, ab dem die Zelle tödlich ist (INF = nie)."""
@@ -299,6 +329,17 @@ def _extract_path(parent: dict, node) -> list[tuple[int, int]]:
     return path
 
 
+def _escape_path(world: _World, start: tuple[int, int], t_free: int, step: int):
+    """Nächster Hafen – bevorzugt außerhalb gegnerischer Bombenlinien, wenn das höchstens zwei
+    Schritte mehr kostet. Liefert (pfad, gefunden)."""
+    path, found = _search(world, start, t_free, step, lambda c, t: world.haven(c, t))
+    if found and world.threat:
+        quiet, ok = _search(world, start, t_free, step, lambda c, t: world.quiet_haven(c, t))
+        if ok and len(quiet) <= len(path) + 2:
+            return quiet, True
+    return path, found
+
+
 def _first_action(start: tuple[int, int], path: list[tuple[int, int]]) -> Action:
     if not path or path[0] == start:
         return Action.NOOP
@@ -324,13 +365,17 @@ def _target_values(world: _World, me, enemies) -> dict[tuple[int, int], float]:
                 continue
             blast = blast_cells(state, x, y, me.flame)
             crates = sum(1 for (bx, by) in blast if state.tiles[by][bx] == TILE_SOFT)
-            hits = sum(1 for e in enemy_cells if e in blast)
+            hit = [e for e in enemy_cells if e in blast]
             v = 0.0
             if crates:
                 v = 1.0 + 0.5 * (crates - 1)
-            if hits:
-                v = max(v, 2.0 + 0.5 * hits)
+            if hit:
+                v = max(v, 2.0 + 0.5 * len(hit))
+                if any(is_cornered(state, ex, ey) for ex, ey in hit):
+                    v += 1.5                       # Gegner ohne Fluchtweg: jetzt zuschlagen
             if v:
+                if c in world.threat:
+                    v *= 0.6                        # in gegnerischer Bombenlinie nicht verweilen
                 vals[c] = max(vals.get(c, 0.0), v)
     return vals
 
@@ -404,7 +449,7 @@ def _plan_attack(state: GameState, rules: Rules, me, enemies, step: int,
         n = (cur[0] + dx, cur[1] + dy)
         if not world.passable(n) or not world.safe(n, 0, step):
             continue
-        path, found = _search(world, n, 0, step, lambda c, t, w=world: w.haven(c, t))
+        path, found = _escape_path(world, n, 0, step)
         if found and (best is None or len(path) < best[0]):
             best = (len(path), (dx, dy), [n] + path)
     return (_STEP_BOMB[best[1]], best[2]) if best else None
@@ -446,6 +491,13 @@ def _replay(now: float) -> Action:
     idx = int(max(0.0, elapsed) / _memo["plan_step_s"])
     if idx >= len(plan):
         return Action.NOOP
+    # Letzter Schritt: Richtung nur in der ersten Slot-Hälfte senden. Ein zu spätes NOOP ist
+    # gefährlich (Server nimmt die Richtung nach Schrittende erneut an → ein Feld zu weit, ggf.
+    # ins Feuer), ein zu frühes NOOP ist harmlos (wird im laufenden Schritt ignoriert).
+    if idx == len(plan) - 1:
+        frac = (max(0.0, elapsed) - idx * _memo["plan_step_s"]) / _memo["plan_step_s"]
+        if frac > 0.5:
+            return Action.NOOP
     prev = _memo["plan_start"] if idx == 0 else plan[idx - 1]
     nxt = plan[idx]
     if nxt == prev:
@@ -467,7 +519,7 @@ def _decide(state: GameState, rules: Rules, me, at_tick) -> Action:
 
     # 1) Überleben: Ist mein Feld kein sicherer Hafen, sofort zum nächsten Hafen.
     if not world.haven(cur, t_free):
-        path, found = _search(world, cur, t_free, step, lambda c, t: world.haven(c, t))
+        path, found = _escape_path(world, cur, t_free, step)
         if found or path:
             return _first_action(cur, path), path, cur, step, t_free
         return Action.NOOP, [], cur, step, t_free      # eingeschlossen – nichts hilft mehr
@@ -486,4 +538,9 @@ def _decide(state: GameState, rules: Rules, me, at_tick) -> Action:
 
     # 3) Ziel ansteuern (Power-up, Bombenplatz mit Kisten/Gegnern)
     path = _plan_target(world, me, step, t_free, enemies)
+    if not path and cur in world.threat:
+        # Kein Ziel, aber ich stehe in einer gegnerischen Bombenlinie: lieber heraustreten.
+        path, found = _search(world, cur, t_free, step, lambda c, t: world.quiet_haven(c, t))
+        if not found:
+            path = []
     return _first_action(cur, path), path, cur, step, t_free

@@ -16,7 +16,7 @@ Startparameter (FR-001).
 | `host` | str | Pflicht |
 | `port` | int | Standard 47800 |
 | `bot` | bool | Anfangsmodus; Standard `False` |
-| `name` | str \| None | **nur lokal/kosmetisch** – wird nicht gesendet |
+| `name` | str \| None | wird im HELLO übertragen (≤ 24 Byte UTF-8); Standard „Carsten" |
 
 ## Action (IntEnum)
 

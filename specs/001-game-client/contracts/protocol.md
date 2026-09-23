@@ -40,6 +40,10 @@ Aktionscodes (unteres Nibble):
 - `seq`-Nibble bei jedem Paket erhöhen, sonst verwirft der Server Pakete als Duplikate.
 - Anmeldung: `0xFF 0xFF` (`HELLO`) senden, bis `ASSIGNED` kommt; bei Ausbleiben alle 500 ms
   wiederholen. Dasselbe `HELLO` fordert bei Bedarf `MATCH_INIT` erneut an.
+- **Name im HELLO** (Server-Update 2026-09-23): `FF FF <len> <Name UTF-8>`, max. 24 Byte, an
+  Zeichengrenzen gekürzt; Steuerzeichen werden serverseitig entfernt. Der Name gehört zum Sitz;
+  ein Moderator-`rename` gewinnt und wird durch erneutes HELLO nicht überschrieben. Das ist das
+  einzige Uplink-Paket, das länger als 2 Byte sein darf. Standardname des Clients: „Carsten".
 - Identität ist an die Absenderadresse gebunden: **immer über denselben Socket/Port** senden
   und empfangen.
 

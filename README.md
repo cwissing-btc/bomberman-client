@@ -34,7 +34,7 @@ python -m bomberman_client --host 127.0.0.1 --port 47800 --name Carsten
 | `--host`  | Serveradresse | `127.0.0.1` |
 | `--port`  | UDP-Port | `47800` |
 | `--bot`   | im Bot-Modus starten | aus |
-| `--name`  | lokaler Anzeigename (wird **nicht** übertragen) | – |
+| `--name`  | Anzeigename, wird im HELLO übertragen (max. 24 Byte UTF-8) | `Carsten` |
 
 Ein Match startet erst, wenn in der Moderations-Web-UI (Standard `http://127.0.0.1:8080`)
 **Start** gedrückt wird und mindestens zwei Spieler verbunden sind.
@@ -63,6 +63,9 @@ Der Bot steuert nur die **eigene** Figur und plant **zeitbewusst**:
   Zündzeit gelingt – auch bei großem eigenen Radius. Immer per Kombi-Aktion (Bombe + Schritt).
 - Ziele: Power-ups (Flamme > Bombe > Tempo) und Bombenplätze mit vielen Kisten/Gegnern, mit
   Hysterese gegen Hin-und-her-Laufen.
+- Gegner-Fähigkeiten: Reichweite und freie Bomben jedes Gegners ergeben **Bedrohungszonen**
+  (was er *jetzt* treffen könnte) – dort verweilt der Bot nicht, flieht lieber in Häfen
+  außerhalb und schlägt bei eingekesselten Gegnern in eigener Reichweite bevorzugt zu.
 - Robust bei Paketverlust: Zähler (Zündschnur, Flammen) werden um die vergangenen Ticks
   gealtert, es gilt eine Sicherheitsmarge, und bei eingefrorenem Zustand (verlorenes DELTA)
   läuft er den bereits zeitlich geprüften Pfad per **Koppelnavigation** nach Wanduhr weiter –

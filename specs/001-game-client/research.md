@@ -54,9 +54,10 @@ Zeichentechnik gilt aber genauso für unseren pygame-Client). Client-Zusammenfas
 - **Decision**: Der Client sendet `HELLO` (`0xFF 0xFF`) und übernimmt die Spieler-ID (0–3) aus
   `ASSIGNED` (Byte 6). Ohne Antwort alle 500 ms wiederholen, Abbruch/Meldung nach 5 s. Bis zum
   Matchstart wird `LOBBY_STATUS` angezeigt.
-- **Spielername**: Wird **nicht** übertragen (Uplink ist 2 Byte). `BOT_GUIDE.md` §3 und
-  `VISUALIZER_GUIDE.md` §3 bestätigen das; Namen vergibt der Moderator (`rename`), Default
-  `bot-<id>`. Ein `--name` am Client bleibt rein lokal/kosmetisch.
+- **Spielername**: Seit dem Server-Update (Commit „bots can name themselves in the hello
+  packet") trägt das HELLO optional `len + Name` (≤ 24 Byte UTF-8). Vorher war der Uplink strikt
+  2 Byte und Namen kamen nur per Moderator-`rename`; das gewinnt weiterhin. Der Client sendet
+  `--name` (Standard „Carsten") im HELLO.
 - **Rationale**: Entspricht dem echten Handshake; korrigiert die frühere Annahme, der Client
   schicke einen Namen.
 - **Alternatives considered**: Name im Paket (technisch unmöglich).
@@ -167,6 +168,11 @@ Zeichentechnik gilt aber genauso für unseren pygame-Client). Client-Zusammenfas
      `ticks_to_cross/60` s), **Bombe nie** wiederholen (Einmal-Aktion); neue Bombe erst nach
      `BOMB_ADD` oder 12 Ticks. Bei 10 % Verlust ist der Zustand ~50 % der Zeit eingefroren –
      ohne Koppelnavigation blieb der Bot nach dem ersten Fluchtschritt in der Bombenlinie stehen.
+  7. **Gegner-Fähigkeiten**: Reichweite/Bombenanzahl aller Spieler kommen per `PLAYER_STATS`.
+     Daraus **Bedrohungszonen** = Kreuzlinien jedes Gegners mit *freier* Bombe (Kapazität =
+     `bombs_max` − aktive Bomben): dort nicht verweilen (Zielwert ×0,6), Flucht bevorzugt in
+     einen Hafen außerhalb (≤ 2 Schritte Umweg), ohne Ziel aus der Linie treten. Eingekesselte
+     Gegner (≤ 1 begehbarer Nachbar) in eigener Reichweite: Angriffswert +1,5.
   6. **Zähler-Alterung**: `fuse`/`ticks` kommen nur per KEYFRAME (alle 30 Ticks), DELTAs zählen
      nicht herunter → Restzeit = Wert − (Tick jetzt − Tick des Stempels), plus 4 Ticks
      Sicherheitsmarge für Latenz. Ohne das hielt der Bot Bomben bis 0,5 s zu lang für harmlos.

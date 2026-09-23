@@ -45,7 +45,7 @@ class Config:
     host: str
     port: int
     bot: bool = False
-    name: str | None = None      # nur lokal/kosmetisch
+    name: str | None = None      # wird im HELLO an den Server übertragen (max. 24 Byte)
 
 
 def run(config: Config) -> None:
@@ -67,7 +67,7 @@ def run(config: Config) -> None:
     match_init_time: float | None = None
     running = True
 
-    net.send(encode_hello())
+    net.send(encode_hello(config.name))
 
     while running:
         now = time.monotonic()
@@ -96,11 +96,11 @@ def run(config: Config) -> None:
             if now - start_time > CONNECT_TIMEOUT:
                 track.phase = Phase.FAILED
             elif now - last_hello > HELLO_INTERVAL:
-                net.send(encode_hello())
+                net.send(encode_hello(config.name))
                 last_hello = now
         elif track.state is None and match_init_time is not None \
                 and now - match_init_time > NO_STATE_TIMEOUT:
-            net.send(encode_hello())          # MATCH_INIT/KEYFRAME verpasst → erneut anfordern
+            net.send(encode_hello(config.name))          # MATCH_INIT/KEYFRAME verpasst → erneut anfordern
             match_init_time = now
 
         # 3) Fenster an Kartengröße anpassen, sobald ein Zustand vorliegt

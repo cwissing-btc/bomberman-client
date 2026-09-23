@@ -18,6 +18,19 @@ def test_encode_action_seq_wraps_to_4_bits():
 
 def test_encode_hello():
     assert p.encode_hello() == b"\xff\xff"
+    assert p.encode_hello("") == b"\xff\xff"
+    assert p.encode_hello("   ") == b"\xff\xff"
+
+
+def test_encode_hello_with_name():
+    d = p.encode_hello("Carsten")
+    assert d[:2] == b"\xff\xff" and d[2] == 7 and d[3:] == b"Carsten"
+
+
+def test_encode_hello_name_truncated_at_char_boundary():
+    d = p.encode_hello("ä" * 13)            # 26 Byte → auf 24 gekürzt = 12 ganze Zeichen
+    assert d[2] == 24 and d[3:].decode("utf-8") == "ä" * 12
+    assert len(d) == 3 + 24
 
 
 def test_decode_too_short_returns_none():

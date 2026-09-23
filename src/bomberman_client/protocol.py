@@ -46,9 +46,19 @@ def encode_action(player_id: int, action: int, seq: int) -> bytes:
     return bytes([player_id & 0xFF, ((seq & 0x0F) << 4) | (int(action) & 0x0F)])
 
 
-def encode_hello() -> bytes:
-    """HELLO = 0xFF 0xFF (Spieler-ID 0xFF, Aktion HELLO)."""
-    return b"\xff\xff"
+HELLO_NAME_MAX_BYTES = 24
+
+
+def encode_hello(name: str | None = None) -> bytes:
+    """HELLO = 0xFF 0xFF – optional gefolgt von Längenbyte + Name (UTF-8, max. 24 Byte, an
+    Zeichengrenzen gekürzt; BOT_GUIDE.md „Naming yourself"). Ohne Namen bleibt es bei 2 Byte."""
+    if not name or not name.strip():
+        return b"\xff\xff"
+    encoded = name.strip().encode("utf-8")
+    if len(encoded) > HELLO_NAME_MAX_BYTES:
+        # an Zeichengrenze kürzen: abgeschnittene Multibyte-Zeichen fallen weg
+        encoded = encoded[:HELLO_NAME_MAX_BYTES].decode("utf-8", "ignore").encode("utf-8")
+    return b"\xff\xff" + bytes([len(encoded)]) + encoded
 
 
 # --- Downlink-Nutzdaten -----------------------------------------------------

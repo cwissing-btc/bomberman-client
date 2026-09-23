@@ -201,7 +201,29 @@ def test_replay_follows_planned_path_by_wall_clock():
     assert bot.decide(track, now=10.0) == Action.UP_BOMB
     assert bot.decide(track, now=10.0) == Action.UP          # Schritt 1 (ohne Bombe)
     assert bot.decide(track, now=10.2) == Action.LEFT        # Schritt 2 aus der Bombenlinie
+    # Letzter Schritt: ab der zweiten Slot-Hälfte NOOP, damit die Figur nicht überschießt
+    step_s = 8 / 60
+    assert bot.decide(track, now=10.0 + 1 / 60 + step_s * 1.7) == Action.NOOP
     assert bot.decide(track, now=15.0) == Action.NOOP        # Plan abgearbeitet → warten
+
+
+def test_threat_cells_use_enemy_flame_and_capacity():
+    state = GameState(9, 3, open_field(9, 3))
+    state.players[0] = me_at(6, 1)
+    state.players[1] = enemy_at(1, 1, 1, flame=3)         # kann sofort bomben: Linie bis x=4
+    assert (4, 1) in bot.threat_cells(state, 0) and (5, 1) not in bot.threat_cells(state, 0)
+    state.bombs[7] = Bomb(7, 1, 3, 1, 100)                # seine einzige Bombe liegt schon
+    assert bot.threat_cells(state, 0) == set()            # keine Kapazität → keine Bedrohung
+
+
+def test_escape_prefers_haven_outside_enemy_line():
+    # Flamme unter mir; vier gleich nahe Häfen. Gegner bei (1,1) mit Reichweite 2 deckt (2,1)
+    # und (1,2) ab → nur unten oder rechts liegen außerhalb seiner Bombenlinie.
+    state = GameState(5, 5, open_field(5, 5))
+    state.players[0] = me_at(2, 2)
+    state.players[1] = enemy_at(1, 1, 1, flame=2)
+    state.flames.append(Flame(2, 2, 10))
+    assert bot.decide(make_track(state)) in (Action.DOWN, Action.RIGHT)
 
 
 def test_prefers_reachable_powerup():

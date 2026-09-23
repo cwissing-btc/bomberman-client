@@ -120,7 +120,8 @@ Kisten sprengt und meist nicht in Flammen läuft.
 ### Functional Requirements
 
 - **FR-001**: Der Client MUSS beim Start Serveradresse (Host, Port; Standard 47800), den
-  Anfangsmodus (manuell/Bot) und optional einen **lokalen** Anzeigenamen entgegennehmen.
+  Anfangsmodus (manuell/Bot) und einen Anzeigenamen (Standard „Carsten") entgegennehmen und
+  den Namen im `HELLO` an den Server übertragen (max. 24 Byte UTF-8).
 - **FR-002**: Der Client MUSS sich per `HELLO` (`0xFF 0xFF`) anmelden und die Spieler-ID aus
   `ASSIGNED` übernehmen; ohne Antwort MUSS er `HELLO` alle 500 ms wiederholen.
 - **FR-003**: Kommt innerhalb von 5 s kein `ASSIGNED`, MUSS der Client eine Fehlermeldung
@@ -204,8 +205,9 @@ Kisten sprengt und meist nicht in Flammen läuft.
 - Q: Wie sieht das echte Protokoll aus? → A: Verbindlich in `BOT_GUIDE.md`; Uplink 2 Byte
   (Spieler-ID, seq+Aktion), Downlink Frame-Kopf (Typ + Tick), little-endian, Keyframe/Delta,
   kein Resync, Anmeldung per `HELLO`.
-- Q: Wird ein Spielername übertragen? → A: Nein. Der Server identifiziert per Slot-ID (0–3).
-  Ein Anzeigename ist rein lokal/kosmetisch.
+- Q: Wird ein Spielername übertragen? → A: Ursprünglich nein (Slot-ID 0–3). Seit dem
+  Server-Update vom 2026-09-23 kann das HELLO einen Namen tragen (`FF FF len name`, ≤ 24 Byte);
+  der Client sendet ihn, Standard „Carsten". Ein Moderator-Rename gewinnt.
 
 ## Assumptions
 
