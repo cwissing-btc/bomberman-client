@@ -1,0 +1,14 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.DS_Store
+
+# Lokales Claude-Code-Tooling (nicht Teil des Projekts)
+.claude/
+# Redundant: Assets sind unter assets/ entpackt
+bomberman-assets.zip

@@ -1,0 +1,1 @@
+"""Bomberman-Spielclient (UDP, pygame)."""

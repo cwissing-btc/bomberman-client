@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bomberman-client"
+version = "0.1.0"
+description = "pygame-Client für die Bomberman-Arena (UDP-Spieler-/Bot-Client)"
+requires-python = ">=3.12"
+dependencies = ["pygame>=2.6"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+bomberman-client = "bomberman_client.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
