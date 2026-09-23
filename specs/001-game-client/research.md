@@ -196,6 +196,18 @@ Zeichentechnik gilt aber genauso für unseren pygame-Client). Client-Zusammenfas
   12. **Moderator-`end` sendet kein MATCH_END** (Server `end_match` setzt nur den Lobby-Zustand).
      Ein LOBBY_STATUS ≠ running während PLAYING beendet das Match daher clientseitig; sonst blieb
      der Client auf altem Zustand in PLAYING.
+  13. **Kein Pendeln beim Warten auf die Bombe**: Drei Ursachen. (a) Der Server setzt x/y ab
+     Schrittbeginn auf das Zielfeld; `_plan_target` schloss das Zielfeld als „aktuelle Position“
+     aus und wählte unterwegs ein anderes Ziel → nach Ankunft sofort zurück. Jetzt: unterwegs
+     zum Ziel nicht umplanen. (b) Auf dem Bombenplatz ohne freie Bombe wurde der Platz gesperrt
+     und der nächste angesteuert (der wiederum gesperrt wurde …). Jetzt: dort stehen bleiben,
+     bis die Bombe frei ist; gesperrt wird nur noch „Bombe frei, aber keine sichere Flucht“.
+     (c) Der Zielplaner lief durch Felder, die erst in ~100 Ticks brennen (pro Schritt „sicher“),
+     wo die Überlebensregel sofort zurück in den Hafen trieb. Jetzt: Zielpfade nur über Häfen.
+  14. **Verlorener Bomben-Befehl**: Der Server übernimmt je Tick nur das neueste Paket; Bombe
+     und folgendes NOOP im selben Fenster → Bombe weg, Bot lief ohne Bombe los und kehrte um.
+     Steht der Bot im Folgetick unverändert ohne Bombe da, wiederholt er den Befehl einmal
+     (ungefährlich: Schritt läuft → ignoriert; Bombe liegt → kein zweiter Wurf).
   6. **Zähler-Alterung**: `fuse`/`ticks` kommen nur per KEYFRAME (alle 30 Ticks), DELTAs zählen
      nicht herunter → Restzeit = Wert − (Tick jetzt − Tick des Stempels), plus 4 Ticks
      Sicherheitsmarge für Latenz. Ohne das hielt der Bot Bomben bis 0,5 s zu lang für harmlos.

@@ -350,5 +350,92 @@ def test_memory_is_kept_within_a_match():
     assert bot.decide(track) in BOMBS
     assert bot._memo["bomb_sent_tick"] == 30
     track.at_tick = 31
-    bot.decide(track)                       # gleiches Match: Cooldown bleibt wirksam
-    assert bot._memo["bomb_sent_tick"] == 30
+    assert bot.decide(track) in BOMBS       # einmalige Wiederholung (nichts ist passiert)
+    track.at_tick = 32
+    assert bot.decide(track) not in BOMBS   # gleiches Match: Cooldown bleibt wirksam
+    assert bot._memo["bomb_sent_tick"] == 31
+
+
+# --- Kein Pendeln beim Warten auf die eigene Bombe -------------------------------------
+
+def _waiting_state():
+    """Ich stehe auf meinem Bombenplatz (1,2) neben Kiste (1,3); meine einzige Bombe brennt weit
+    weg bei (4,4) – nichts bedroht mich. Nachbar (2,1)… ebenfalls ein Bombenplatz (Kiste (3,1))."""
+    tiles = open_field(7, 7)
+    tiles[3][1] = TILE_SOFT
+    tiles[1][3] = TILE_SOFT
+    state = GameState(7, 7, tiles, players={0: me_at(1, 2, flame=1, bombs_max=1)})
+    state.bombs[1] = Bomb(1, 0, 4, 4, 100, seen_tick=100)
+    return state
+
+
+def test_waits_on_bomb_spot_while_own_bomb_is_burning():
+    bot._memo.update({"target": (1, 2), "match_id": 1})
+    track = _track_for_match(_waiting_state(), match_id=1, tick=100)
+    for tick in range(100, 110):
+        track.at_tick = tick
+        assert bot.decide(track) == Action.NOOP
+    assert bot._memo["target"] == (1, 2)
+    assert (1, 2) not in bot._memo["banned"]
+
+
+def test_bombs_as_soon_as_bomb_is_available_again():
+    bot._memo.update({"target": (1, 2), "match_id": 1})
+    state = _waiting_state()
+    track = _track_for_match(state, match_id=1, tick=100)
+    assert bot.decide(track) == Action.NOOP
+    state.bombs.clear()                                   # Bombe gezündet, Flammen weg
+    track.at_tick = 130
+    assert bot.decide(track) in BOMBS
+
+
+def test_does_not_retarget_mid_step():
+    """Server setzt x/y ab Schrittbeginn auf das Zielfeld. Unterwegs zum Ziel darf der Bot es
+    nicht als „aktuelle Position" ausschließen und ein anderes wählen (Ursache des Pendelns)."""
+    state = _waiting_state()
+    me = state.players[0]
+    me.moving, me.move_progress = True, 3                 # unterwegs nach (1,2)
+    bot._memo.update({"target": (1, 2), "match_id": 1})
+    track = _track_for_match(state, match_id=1, tick=100)
+    assert bot.decide(track) == Action.NOOP
+    assert bot._memo["target"] == (1, 2)
+
+
+def test_still_bans_spot_without_escape_route():
+    """Der Sperr-Mechanismus bleibt für den Fall „Bombe frei, aber keine sichere Flucht"."""
+    tiles = open_field(5, 5)
+    # Sackgasse: (1,1) mit Kiste rechts (2,1) und Wand unten (1,2) → Flucht unmöglich
+    tiles[1][2] = TILE_SOFT
+    tiles[2][1] = TILE_WALL
+    state = GameState(5, 5, tiles, players={0: me_at(1, 1, flame=1)})
+    bot._memo.update({"target": (1, 1), "match_id": 1})
+    track = _track_for_match(state, match_id=1, tick=100)
+    bot.decide(track)
+    assert (1, 1) in bot._memo["banned"]
+
+
+# --- Verlorener Bomben-Befehl wird einmal wiederholt ------------------------------------
+
+def test_resends_bomb_action_once_when_nothing_happened():
+    """Server nimmt je Tick nur das neueste Paket: Bombe + folgendes NOOP im selben Fenster →
+    Bombe verloren. Steht der Bot im Folgetick unverändert ohne Bombe da, wiederholt er den
+    Befehl genau einmal statt 12 Ticks Cooldown abzuwarten."""
+    state = _crate_corner_state()
+    track = _track_for_match(state, match_id=1, tick=100)
+    first = bot.decide(track)
+    assert first in BOMBS
+    track.at_tick = 101                                   # nichts passiert: keine Bombe, stehe
+    assert bot.decide(track) == first
+    track.at_tick = 102
+    assert bot.decide(track) not in BOMBS                 # kein drittes Mal (Cooldown)
+
+
+def test_no_resend_when_step_started_or_bomb_present():
+    state = _crate_corner_state()
+    track = _track_for_match(state, match_id=1, tick=100)
+    assert bot.decide(track) in BOMBS
+    state.bombs[9] = Bomb(9, 0, 1, 2, 120, seen_tick=101)  # Bombe liegt, Schritt läuft
+    me = state.players[0]
+    me.x, me.y, me.moving, me.move_progress = 1, 1, True, 1
+    track.at_tick = 101
+    assert bot.decide(track) not in BOMBS

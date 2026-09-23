@@ -68,6 +68,10 @@ Der Bot steuert nur die **eigene** Figur und plant **zeitbewusst**:
   auf Basis der exakten Schließ-Reihenfolge des Servers.
 - Matchwechsel: Das Bot-Gedächtnis (Cooldowns, Sperren, Ziel) wird pro Match zurückgesetzt;
   wiederholte MATCH_INIT-Frames desselben Matches löschen den Zustand nicht.
+- Ruhiges Warten: Ohne freie Bombe bleibt der Bot auf seinem Bombenplatz stehen, plant unterwegs
+  nicht um und läuft zu Zielen nur über Felder, die für einen ganzen Zündzyklus sicher sind
+  (kein Pendeln zwischen Hafen und künftiger Explosionszone). Ein verlorener Bomben-Befehl wird
+  einmal wiederholt.
 - Gegner-Fähigkeiten: Reichweite und freie Bomben jedes Gegners ergeben **Bedrohungszonen**
   (was er *jetzt* treffen könnte) – dort verweilt der Bot nicht, flieht lieber in Häfen
   außerhalb und schlägt bei eingekesselten Gegnern in eigener Reichweite bevorzugt zu.

@@ -69,7 +69,7 @@ def reset() -> None:
     _memo.update({"tick": None, "action": Action.NOOP, "plan": [], "plan_start": None,
                   "plan_t0": 0.0, "plan_step_s": 8 / _TICKS_PER_SECOND, "plan_delay_s": 0.0,
                   "target": None, "banned": {}, "bomb_sent_tick": None,
-                  "last_move_tick": None, "match_id": None})
+                  "last_move_tick": None, "match_id": None, "bomb_action": None})
 
 
 reset()
@@ -463,19 +463,26 @@ def _plan_target(world: _World, me, step: int, t_free: int, enemies) -> list[tup
         if vmax / (k + 1) <= best_util:
             break                                     # keine Verbesserung mehr möglich
         v = vals.get(cell)
-        if v and cell != start and world.safe(cell, t, t + 2 * step):
+        if v and (cell != start or t_free > 0) and world.haven(cell, t):
             if cell == _memo["target"]:
                 v *= _HYSTERESIS
             util = v / (k + 1)
             if util > best_util:
-                best_util, best_path, best_cell = util, _extract_path(parent, (cell, k)), cell
+                # Ziel = Feld, auf das ich gerade zulaufe → Pfad [start] (Aktion: NOOP, ankommen)
+                path = _extract_path(parent, (cell, k)) or [cell]
+                best_util, best_path, best_cell = util, path, cell
         if k >= K_MAX:
             continue
         t2 = t + step
+        # Zum Ziel nur über Felder, die beim Betreten für einen ganzen Zündzyklus sicher sind
+        # (Häfen). Ein Feld, das erst in 100 Ticks brennt, wäre zum Durchqueren zwar „sicher",
+        # doch die Überlebensregel (1) treibt einen von dort sofort wieder in einen Hafen: Der Bot
+        # pendelte zwischen Hafen und Durchgangsfeld, bis die eigene Bombe gezündet hatte.
+        # Ziele hinter einer künftigen Explosion warten, bis sie vorbei ist.
         for dx, dy in DIRS:
             n = (cell[0] + dx, cell[1] + dy)
             nxt = (n, k + 1)
-            if nxt in parent or not world.passable(n) or not world.safe(n, t, t2):
+            if nxt in parent or not world.passable(n) or not world.haven(n, t):
                 continue
             parent[nxt] = (cell, k)
             queue.append(nxt)
@@ -490,6 +497,24 @@ def _plan_target(world: _World, me, step: int, t_free: int, enemies) -> list[tup
     return best_path
 
 
+def _bomb_unavailable(state: GameState, me, now_tick: int) -> bool:
+    """Alle Bomben aktiv oder eben erst eine angefordert (auf BOMB_ADD warten)."""
+    if bomb_capacity(state, me.id) == 0:
+        return True
+    sent = _memo["bomb_sent_tick"]
+    return sent is not None and now_tick - sent < BOMB_COOLDOWN_TICKS
+
+
+def _bomb_worth_here(state: GameState, me, enemies) -> bool:
+    """Lohnt eine Bombe auf meinem Feld? Kisten/Gegner im Kreuz, verbrannte Power-ups zählen
+    negativ."""
+    blast = blast_cells(state, me.x, me.y, me.flame)
+    crates = sum(1 for (bx, by) in blast if state.tiles[by][bx] == TILE_SOFT)
+    hits = sum(1 for e in enemies if (e.x, e.y) in blast)
+    burned = sum(1 for pu in state.powerups.values() if (pu.x, pu.y) in blast)
+    return crates + 3 * hits - burned >= 1
+
+
 def _plan_attack(state: GameState, rules: Rules, me, enemies, step: int,
                  now_tick: int):
     """Bombe legen + ausweichen, wenn es sich lohnt UND die Flucht rechtzeitig gelingt.
@@ -497,20 +522,9 @@ def _plan_attack(state: GameState, rules: Rules, me, enemies, step: int,
     Liefert ``(Aktion, Pfad)`` oder ``None``. ``(NOOP, [])`` bedeutet: guter Platz, aber es
     wurde eben noch eine Bewegung gesendet – erst zur Ruhe kommen, dann bomben (sonst würde die
     Bombe auf dem Zielfeld eines vom Server gerade noch angenommenen Schritts landen)."""
-    my_bombs = sum(1 for b in state.bombs.values() if b.owner == me.id)
-    if my_bombs >= max(1, me.bombs_max):
+    if _bomb_unavailable(state, me, now_tick) or not _bomb_worth_here(state, me, enemies):
         return None
-    sent = _memo["bomb_sent_tick"]
-    if sent is not None and now_tick - sent < BOMB_COOLDOWN_TICKS:
-        return None        # Bombe bereits angefordert – erst auf BOMB_ADD / Ablauf warten
     cur = (me.x, me.y)
-    blast = blast_cells(state, cur[0], cur[1], me.flame)
-    crates = sum(1 for (bx, by) in blast if state.tiles[by][bx] == TILE_SOFT)
-    hits = sum(1 for e in enemies if (e.x, e.y) in blast)
-    burned = sum(1 for pu in state.powerups.values() if (pu.x, pu.y) in blast)
-    if crates + 3 * hits - burned < 1:
-        return None
-
     world = _World(state, rules, me.id, extra_bomb=(cur, me.flame), now_tick=now_tick)
     best = None                                   # (Länge, Richtung, Gesamtpfad ab cur)
     for dx, dy in DIRS:
@@ -545,16 +559,42 @@ def decide(track: TrackState, now: float = 0.0) -> Action:
             _memo["last_move_tick"] = track.at_tick
         return action
 
-    action, path, start, step, t_free = _decide(
-        state, track.match.rules if track.match else Rules(), me, track.at_tick)
+    resend = _lost_bomb_action(state, me, track.at_tick)
+    if resend is not None:
+        action, path, start, step, t_free = resend
+    else:
+        action, path, start, step, t_free = _decide(
+            state, track.match.rules if track.match else Rules(), me, track.at_tick)
     _memo.update({"tick": track.at_tick, "action": action, "plan": path, "plan_start": start,
                   "plan_t0": now, "plan_step_s": step / _TICKS_PER_SECOND,
                   "plan_delay_s": t_free / _TICKS_PER_SECOND})
     if action in _WITHOUT_BOMB and track.at_tick is not None:
         _memo["bomb_sent_tick"] = track.at_tick
+        if resend is None:                  # nur der Erstbefehl darf einmal wiederholt werden
+            _memo["bomb_action"] = (action, path, (me.x, me.y), step, t_free)
     if action in _STEP.values() and track.at_tick is not None:
         _memo["last_move_tick"] = track.at_tick
     return action
+
+
+def _lost_bomb_action(state: GameState, me, at_tick):
+    """Bomben-Befehl des Vortick einmal wiederholen, wenn er offenbar nicht ankam.
+
+    Der Server übernimmt je Tick nur das *neueste* Paket eines Spielers. Landen Bomben-Befehl
+    und das folgende NOOP im selben Tick-Fenster, ist die Bombe verloren – der Bot lief dann
+    ohne Bombe los, merkte es am Ziel und kehrte um. Die Wiederholung ist ungefährlich: Wurde
+    der erste Befehl angenommen, laufe ich bereits (Aktionen während eines Schritts ignoriert
+    der Server) oder die Bombe liegt schon (kein zweiter Wurf auf dasselbe Feld)."""
+    saved = _memo["bomb_action"]
+    if saved is None or at_tick is None or _memo["bomb_sent_tick"] != at_tick - 1:
+        return None
+    action, path, cell, step, t_free = saved
+    if me.moving or (me.x, me.y) != cell:
+        return None                                    # Schritt lief an → Befehl kam an
+    if any((b.x, b.y) == cell for b in state.bombs.values()):
+        return None                                    # Bombe liegt → Befehl kam an
+    _memo["bomb_action"] = None                        # nur ein Versuch
+    return action, path, cell, step, t_free
 
 
 def _forget_previous_match(track: TrackState) -> None:
@@ -625,11 +665,23 @@ def _decide(state: GameState, rules: Rules, me, at_tick) -> Action:
         if attack is not None:
             action, path = attack
             return action, path, cur, step, t_free
-        # Ich stehe auf einem angepeilten Bombenplatz, kann hier aber nicht sicher bomben →
-        # Platz vorübergehend sperren, sonst stünde ich hier fest.
         if cur == _memo["target"] and at_tick is not None:
+            if (_bomb_unavailable(state, me, now_tick) and _bomb_worth_here(state, me, enemies)
+                    and cur not in world.threat):
+                # Guter Platz, nur gerade keine Bombe frei: hier stehen bleiben, bis die eigene
+                # Bombe gezündet hat. Vorher wurde der Platz gesperrt und ein Nachbarplatz
+                # angesteuert, der wiederum gesperrt wurde … der Bot pendelte, bis er bomben
+                # konnte (jeder Schritt kostet Zeit und Sicherheitsreserve).
+                return Action.NOOP, [], cur, step, t_free
+            # Ich stehe auf einem angepeilten Bombenplatz, kann hier aber nicht sicher bomben →
+            # Platz vorübergehend sperren, sonst stünde ich hier fest.
             _memo["banned"][cur] = at_tick + rules.bomb_fuse_ticks
             _memo["target"] = None
+    elif cur == _memo["target"]:
+        # Unterwegs zum Ziel (der Server setzt x/y ab Schrittbeginn auf das Zielfeld): den Schritt
+        # zu Ende laufen, nicht umplanen. Sonst schloss `_plan_target` das Zielfeld als „aktuelle
+        # Position" aus, wählte einen anderen Platz und der Bot lief nach Ankunft sofort zurück.
+        return Action.NOOP, [], cur, step, t_free
 
     # 3) Ziel ansteuern (Power-up, Bombenplatz mit Kisten/Gegnern)
     path = _plan_target(world, me, step, t_free, enemies)
